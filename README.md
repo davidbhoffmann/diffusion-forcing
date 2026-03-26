@@ -31,7 +31,7 @@ Run `conda activate diffusion-forcing` to activate this environment.
 
 Install dependencies for time series, video and robotics:
 
-```
+```bash
 pip install -r requirements.txt
 ```
 
@@ -41,7 +41,7 @@ Then modify the wandb entity in `configurations/config.yaml` to your wandb accou
 
 Optionally, if you want to do maze planning, install the following complicated dependencies due to outdated dependencies of d4rl. This involves first installing mujoco 210 and then run
 
-```
+```bash
 MUJOCO_DIR=/scratch/shared/beegfs/dhoffmann/lib/mujoco
 mkdir -p $MUJOCO_DIR
 wget https://github.com/deepmind/mujoco/releases/download/2.1.0/mujoco210-linux-x86_64.tar.gz -O $MUJOCO_DIR/mujoco210.tar.gz
@@ -49,6 +49,24 @@ tar -xzf $MUJOCO_DIR/mujoco210.tar.gz -C $MUJOCO_DIR
 rm $MUJOCO_DIR/mujoco210.tar.gz
 pip install -r ../diffuser/requirements0.txt 
 pip install -r extra_requirements.txt
+```
+```bash
+mkdir -p $CONDA_PREFIX/etc/conda/activate.d
+echo 'export MUJOCO_PY_MUJOCO_PATH="/scratch/shared/beegfs/dhoffmann/lib/mujoco/mujoco210"' >> $CONDA_PREFIX/etc/conda/activate.d/mujoco.sh
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/scratch/shared/beegfs/dhoffmann/lib/mujoco/mujoco210/bin' >> $CONDA_PREFIX/etc/conda/activate.d/mujoco.sh
+conda install -c conda-forge xorg-libx11 -y
+conda install -c conda-forge xorg-xproto xorg-libxext -y
+```
+
+```
+# Save this alongside your environment.yml
+module load gcc/12.3.0
+module load cuda/11.1
+
+export MUJOCO_PY_MUJOCO_PATH="/scratch/shared/beegfs/dhoffmann/lib/mujoco/mujoco210"
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$MUJOCO_PY_MUJOCO_PATH/bin:/usr/lib/nvidia
+export CC=gcc
+export CXX=g++
 ```
 
 ## Quick start with pretrained checkpoints
