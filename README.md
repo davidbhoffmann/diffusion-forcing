@@ -42,6 +42,12 @@ Then modify the wandb entity in `configurations/config.yaml` to your wandb accou
 Optionally, if you want to do maze planning, install the following complicated dependencies due to outdated dependencies of d4rl. This involves first installing mujoco 210 and then run
 
 ```
+MUJOCO_DIR=/scratch/shared/beegfs/dhoffmann/lib/mujoco
+mkdir -p $MUJOCO_DIR
+wget https://github.com/deepmind/mujoco/releases/download/2.1.0/mujoco210-linux-x86_64.tar.gz -O $MUJOCO_DIR/mujoco210.tar.gz
+tar -xzf $MUJOCO_DIR/mujoco210.tar.gz -C $MUJOCO_DIR
+rm $MUJOCO_DIR/mujoco210.tar.gz
+pip install -r ../diffuser/requirements0.txt 
 pip install -r extra_requirements.txt
 ```
 
