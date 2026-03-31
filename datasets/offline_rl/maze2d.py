@@ -150,7 +150,9 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         max_stats_samples = int(getattr(self.cfg, "max_stats_samples", 200000))
         n = observations.shape[0]
         if n > max_stats_samples:
-            idx = np.random.default_rng(0).choice(n, size=max_stats_samples, replace=False)
+            idx = np.random.default_rng(0).choice(
+                n, size=max_stats_samples, replace=False
+            )
             observations = observations[idx]
             actions = actions[idx]
             rewards = rewards[idx]
