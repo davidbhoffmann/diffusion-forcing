@@ -1,7 +1,10 @@
 from pathlib import Path
+from typing import Dict, Optional, Tuple
+from collections import deque
 import numpy as np
 import torch
 from omegaconf import DictConfig
+from omegaconf.omegaconf import open_dict
 from maze_dataset import MazeDataset, MazeDatasetConfig
 import matplotlib.pyplot as plt
 import h5py
@@ -105,19 +108,75 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         self.save_dir = cfg.save_dir
         self.n_mazes = cfg.n_mazes
         self.grid_size = cfg.grid_size
-        if not os.path.exists(cfg.save_dir):
-            os.mkdir(self.save_dir)
+        self.start_goal_pairs_per_maze = int(
+            getattr(cfg, "start_goal_pairs_per_maze", 1)
+        )
+        os.makedirs(cfg.save_dir, exist_ok=True)
+
+        expected_obs_dim = int((self.grid_size * 2 + 1) ** 2)
+        split_path = os.path.join(self.save_dir, f"{split}.npz")
+        needs_regen = not os.path.exists(split_path)
+        if not needs_regen:
+            split_data = np.load(split_path)
+            observations = split_data["observations"]
+            needs_regen = (
+                observations.ndim != 2 or observations.shape[-1] != expected_obs_dim
+            )
+        if needs_regen:
             self.generate_data()
-        self.dataset = dict(np.load(os.path.join(self.save_dir, f"{split}.npz")))
+        self.dataset = dict(np.load(split_path))
         # Backward-compat: older generated files stored scalar actions as shape (N,)
         if self.dataset["actions"].ndim == 1:
             self.dataset["actions"] = self.dataset["actions"][:, None]
+
+        if not bool(getattr(self.cfg, "_runtime_stats_initialized", False)):
+            self._update_cfg_stats_from_dataset()
+
         self.gamma = cfg.gamma
         self.n_frames = cfg.episode_len + 1
         self.total_steps = len(self.dataset["observations"])
         self.dataset["values"] = (
             self.compute_value(self.dataset["rewards"]) * (1 - self.gamma) * 4 - 1
         )
+
+    def _update_cfg_stats_from_dataset(self):
+        observations = self.dataset["observations"]
+        actions = self.dataset["actions"]
+        rewards = self.dataset["rewards"]
+
+        if observations.size == 0:
+            return
+
+        max_stats_samples = int(getattr(self.cfg, "max_stats_samples", 200000))
+        n = observations.shape[0]
+        if n > max_stats_samples:
+            idx = np.random.default_rng(0).choice(n, size=max_stats_samples, replace=False)
+            observations = observations[idx]
+            actions = actions[idx]
+            rewards = rewards[idx]
+
+        observation_mean = observations.mean(axis=0)
+        observation_std = observations.std(axis=0)
+        observation_std = np.where(np.abs(observation_std) < 1e-6, 1.0, observation_std)
+
+        action_mean = actions.mean(axis=0)
+        action_std = actions.std(axis=0)
+        action_std = np.where(np.abs(action_std) < 1e-6, 1.0, action_std)
+
+        reward_mean = float(rewards.mean())
+        reward_std = float(rewards.std())
+        if abs(reward_std) < 1e-6:
+            reward_std = 1.0
+
+        with open_dict(self.cfg):
+            self.cfg.observation_shape = [int(observations.shape[-1])]
+            self.cfg.observation_mean = observation_mean.tolist()
+            self.cfg.observation_std = observation_std.tolist()
+            self.cfg.action_mean = action_mean.tolist()
+            self.cfg.action_std = action_std.tolist()
+            self.cfg.reward_mean = reward_mean
+            self.cfg.reward_std = reward_std
+            self.cfg._runtime_stats_initialized = True
 
     def compute_value(self, reward):
         # numerical stable way to compute value
@@ -146,6 +205,67 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
 
         return observation, action, reward, nonterminal
 
+    def _shortest_path(self, wall_mask, start, goal):
+        if start == goal:
+            return [start]
+
+        h, w = wall_mask.shape
+        q = deque([start])
+        parent: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {start: None}
+
+        while q:
+            r, c = q.popleft()
+            for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if nr < 0 or nr >= h or nc < 0 or nc >= w:
+                    continue
+                if wall_mask[nr, nc]:
+                    continue
+                nxt = (nr, nc)
+                if nxt in parent:
+                    continue
+                parent[nxt] = (r, c)
+                if nxt == goal:
+                    path = [goal]
+                    while path[-1] is not None:
+                        prev = parent[path[-1]]
+                        if prev is None:
+                            break
+                        path.append(prev)
+                    return list(reversed(path))
+                q.append(nxt)
+
+        return None
+
+    def _sample_start_goal_pairs(self, free_cells, n_pairs, rng):
+        pairs = []
+        seen = set()
+        if len(free_cells) < 2:
+            return pairs
+
+        max_attempts = max(100, n_pairs * 30)
+        attempts = 0
+        while len(pairs) < n_pairs and attempts < max_attempts:
+            s_idx, g_idx = rng.choice(len(free_cells), size=2, replace=False)
+            start = tuple(free_cells[s_idx])
+            goal = tuple(free_cells[g_idx])
+            key = (start, goal)
+            attempts += 1
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append(key)
+        return pairs
+
+    def _encode_single_channel_observation(self, wall_mask, curr, goal):
+        obs = np.zeros(wall_mask.shape, dtype=np.float32)
+        obs[wall_mask] = 1.0
+        obs[goal[0], goal[1]] = 3.0
+        if curr == goal:
+            obs[curr[0], curr[1]] = 4.0
+        else:
+            obs[curr[0], curr[1]] = 2.0
+        return obs.flatten()
+
     def generate_data(self, train_frac=0.8, val_frac=0.1):
         cfg = MazeDatasetConfig(
             name="base", grid_n=self.grid_size, n_mazes=self.n_mazes
@@ -164,37 +284,45 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         }
 
         results = {}
+        rng = np.random.default_rng(0)
         for split, split_mazes in splits.items():
             obs, acts, rews = [], [], []
 
             for maze in split_mazes:
-                grid = maze.as_pixels(False, False)[:, :, 2]
-                path_pixels = [(r * 2 + 1, c * 2 + 1) for r, c in maze.solution]
-                goal = path_pixels[-1]
+                pixels = maze.as_pixels(False, False)
+                wall_mask = pixels[:, :, 2] >= 254
+                free_cells = np.argwhere(~wall_mask)
+                pairs = self._sample_start_goal_pairs(
+                    free_cells, self.start_goal_pairs_per_maze, rng
+                )
 
-                for i, curr in enumerate(path_pixels):
-                    if i < len(path_pixels) - 1:
-                        nxt = path_pixels[i + 1]
-                        if nxt[0] < curr[0]:
-                            a = 0
-                        elif nxt[0] > curr[0]:
-                            a = 1
-                        elif nxt[1] < curr[1]:
-                            a = 2
+                for start, goal in pairs:
+                    path_pixels = self._shortest_path(wall_mask, start, goal)
+                    if not path_pixels:
+                        continue
+
+                    for i, curr in enumerate(path_pixels):
+                        if i < len(path_pixels) - 1:
+                            nxt = path_pixels[i + 1]
+                            if nxt[0] < curr[0]:
+                                a = 0
+                            elif nxt[0] > curr[0]:
+                                a = 1
+                            elif nxt[1] < curr[1]:
+                                a = 2
+                            else:
+                                a = 3
+                            r = 0.0
                         else:
-                            a = 3
-                        r = 0.0
-                    else:
-                        a, r = 0, 1.0
+                            a, r = 0, 1.0
 
-                    o = np.zeros((3, grid.shape[0], grid.shape[1]), dtype=np.float32)
-                    o[0] = grid
-                    o[1, curr[0], curr[1]] = 1.0
-                    o[2, goal[0], goal[1]] = 1.0
+                        o = self._encode_single_channel_observation(
+                            wall_mask, tuple(curr), tuple(goal)
+                        )
 
-                    obs.append(o.flatten())
-                    acts.append([a])
-                    rews.append(r)
+                        obs.append(o)
+                        acts.append([a])
+                        rews.append(r)
 
             results[split] = {
                 "observations": np.stack(obs) if obs else np.array([]),

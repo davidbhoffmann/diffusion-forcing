@@ -7,7 +7,8 @@ gamma: 1.0
 episode_len: 800
 n_mazes: 100000
 grid_size: 3
-observation_shape: [147] # last two are grid_size*2+1
+start_goal_pairs_per_maze: 8
+observation_shape: [49] # flattened single-channel grid, side=(2*grid_size+1)
 action_dim: 1
 goal_dim: 2
 

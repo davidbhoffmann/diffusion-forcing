@@ -6,6 +6,7 @@ data_mean: null
 data_std: null
 reward_mean: ${dataset.reward_mean}
 reward_std: ${dataset.reward_std}
+observation_shape: ${dataset.observation_shape}
 observation_mean: ${dataset.observation_mean}
 observation_std: ${dataset.observation_std}
 action_mean: ${dataset.action_mean}

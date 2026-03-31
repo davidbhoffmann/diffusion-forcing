@@ -17,12 +17,43 @@ from utils.logging_utils import (
 class DiffusionForcingPlanning(DiffusionForcingBase):
     def __init__(self, cfg: DictConfig):
         self.env_id = cfg.env_id
-        self.observation_mean = np.array(cfg.observation_mean).reshape(-1)
-        self.observation_std = np.array(cfg.observation_std).reshape(-1)
+        observation_shape_cfg = cfg.get("observation_shape", None)
+        if observation_shape_cfg is not None:
+            observation_shape = tuple(int(x) for x in observation_shape_cfg)
+            self.observation_dim = int(np.prod(observation_shape))
+        else:
+            fallback_mean = cfg.get("observation_mean", None)
+            if fallback_mean is None:
+                raise ValueError(
+                    "Missing observation shape information: expected cfg.observation_shape "
+                    "or cfg.observation_mean."
+                )
+            self.observation_dim = int(np.array(fallback_mean).reshape(-1).shape[0])
+
+        raw_observation_mean = np.array(cfg.observation_mean).reshape(-1)
+        raw_observation_std = np.array(cfg.observation_std).reshape(-1)
+        if raw_observation_mean.size == self.observation_dim:
+            self.observation_mean = raw_observation_mean
+        elif raw_observation_mean.size == 1:
+            self.observation_mean = np.repeat(
+                raw_observation_mean, self.observation_dim
+            )
+        else:
+            self.observation_mean = np.zeros(self.observation_dim, dtype=np.float32)
+
+        if raw_observation_std.size == self.observation_dim:
+            self.observation_std = raw_observation_std
+        elif raw_observation_std.size == 1:
+            self.observation_std = np.repeat(raw_observation_std, self.observation_dim)
+        else:
+            self.observation_std = np.ones(self.observation_dim, dtype=np.float32)
+
+        self.observation_std = np.where(
+            np.abs(self.observation_std) < 1e-6, 1.0, self.observation_std
+        )
         self.action_mean = np.array(cfg.action_mean).reshape(-1)
         self.action_std = np.array(cfg.action_std).reshape(-1)
         self.action_dim = int(self.action_mean.shape[0])
-        self.observation_dim = int(self.observation_mean.shape[0])
         self.use_reward = cfg.use_reward
         self.unstacked_dim = (
             self.observation_dim + self.action_dim + int(self.use_reward)
@@ -218,9 +249,21 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
                     dist
                 )  # guidance observation and action with separate weights
                 dist_a = torch.sum(dist_a, -1, keepdim=True).sqrt()
-                dist_o = reduce(
-                    dist_o, "t b (n c) -> t b n", "sum", n=self.observation_dim // 2
-                ).sqrt()
+
+                # Legacy maze2d states use paired observation channels (e.g. x/y, vx/vy).
+                # Flattened grid observations (e.g. 147-d) are not pair-structured.
+                if (self.observation_dim % 2 == 0) and (
+                    not self._is_grid_observation()
+                ):
+                    dist_o = reduce(
+                        dist_o,
+                        "t b (n c) -> t b n",
+                        "sum",
+                        n=self.observation_dim // 2,
+                    ).sqrt()
+                else:
+                    dist_o = torch.sum(dist_o, -1, keepdim=True).sqrt()
+
                 dist_o = torch.tanh(
                     dist_o / 2
                 )  # similar to the "squashed gaussian" in RL, squash to (-1, 1)
@@ -470,14 +513,26 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
             )
 
     def _is_grid_observation(self):
-        if self.observation_dim % 3 != 0:
-            return False
-        side_sq = self.observation_dim // 3
-        side = int(np.sqrt(side_sq))
-        return side * side == side_sq
+        return self._grid_layout() is not None
+
+    def _grid_layout(self):
+        side = int(np.sqrt(self.observation_dim))
+        if side * side == self.observation_dim:
+            return 1, side
+
+        if self.observation_dim % 3 == 0:
+            side_sq = self.observation_dim // 3
+            side = int(np.sqrt(side_sq))
+            if side * side == side_sq:
+                return 3, side
+
+        return None
 
     def _grid_side(self):
-        return int(np.sqrt(self.observation_dim // 3))
+        layout = self._grid_layout()
+        if layout is None:
+            raise ValueError("Not a supported grid observation layout")
+        return layout[1]
 
     def _extract_start_goal_from_batch(self, batch):
         observations = batch[0][..., : self.observation_dim].float().to(self.device)
@@ -490,10 +545,20 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
     def _observations_to_xy(self, obs):
         if not self._is_grid_observation():
             return obs[..., :2]
-        side = self._grid_side()
-        flat = obs.reshape(*obs.shape[:-1], 3, side, side)[..., 1, :, :].reshape(
-            *obs.shape[:-1], -1
-        )
+
+        layout = self._grid_layout()
+        if layout is None:
+            raise ValueError("Not a supported grid observation layout")
+        channels, side = layout
+        if channels == 3:
+            flat = obs.reshape(*obs.shape[:-1], 3, side, side)[..., 1, :, :].reshape(
+                *obs.shape[:-1], -1
+            )
+        else:
+            grid = obs.reshape(*obs.shape[:-1], side, side).reshape(*obs.shape[:-1], -1)
+            score_agent = -torch.minimum((grid - 2.0) ** 2, (grid - 4.0) ** 2)
+            flat = score_agent
+
         idx = flat.argmax(-1)
         x = (idx // side).float()
         y = (idx % side).float()
@@ -502,30 +567,62 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
     def _goals_to_xy(self, obs):
         if not self._is_grid_observation():
             return obs[..., :2]
-        side = self._grid_side()
-        flat = obs.reshape(*obs.shape[:-1], 3, side, side)[..., 2, :, :].reshape(
-            *obs.shape[:-1], -1
-        )
+
+        layout = self._grid_layout()
+        if layout is None:
+            raise ValueError("Not a supported grid observation layout")
+        channels, side = layout
+        if channels == 3:
+            flat = obs.reshape(*obs.shape[:-1], 3, side, side)[..., 2, :, :].reshape(
+                *obs.shape[:-1], -1
+            )
+        else:
+            grid = obs.reshape(*obs.shape[:-1], side, side).reshape(*obs.shape[:-1], -1)
+            score_goal = -torch.minimum((grid - 3.0) ** 2, (grid - 4.0) ** 2)
+            flat = score_goal
+
         idx = flat.argmax(-1)
         x = (idx // side).float()
         y = (idx % side).float()
         return torch.stack([x, y], -1)
 
     def _decode_grid(self, obs):
-        side = self._grid_side()
-        grid = obs.reshape(obs.shape[0], 3, side, side)
-        wall = grid[:, 0] >= 254.0
+        layout = self._grid_layout()
+        if layout is None:
+            raise ValueError("Not a supported grid observation layout")
+        channels, side = layout
+        if channels == 3:
+            grid = obs.reshape(obs.shape[0], 3, side, side)
+            wall = grid[:, 0] >= 254.0
+        else:
+            grid = obs.reshape(obs.shape[0], side, side)
+            wall = (grid > 0.5) & (grid < 1.5)
+
         pos = self._observations_to_xy(obs).long()
         goal = self._goals_to_xy(obs).long()
         return wall, pos, goal
 
     def _encode_grid(self, wall, pos, goal):
         batch_size, side, _ = wall.shape
-        obs = torch.zeros((batch_size, 3, side, side), device=wall.device)
-        obs[:, 0] = wall.float() * 255.0
+        layout = self._grid_layout()
+        if layout is None:
+            raise ValueError("Not a supported grid observation layout")
+        channels, _ = layout
         b = torch.arange(batch_size, device=wall.device)
-        obs[b, 1, pos[:, 0], pos[:, 1]] = 1.0
-        obs[b, 2, goal[:, 0], goal[:, 1]] = 1.0
+
+        if channels == 3:
+            obs = torch.zeros((batch_size, 3, side, side), device=wall.device)
+            obs[:, 0] = wall.float() * 255.0
+            obs[b, 1, pos[:, 0], pos[:, 1]] = 1.0
+            obs[b, 2, goal[:, 0], goal[:, 1]] = 1.0
+            return obs.flatten(1)
+
+        obs = torch.zeros((batch_size, side, side), device=wall.device)
+        obs[wall] = 1.0
+        obs[b, goal[:, 0], goal[:, 1]] = 3.0
+        same = (pos[:, 0] == goal[:, 0]) & (pos[:, 1] == goal[:, 1])
+        obs[b, pos[:, 0], pos[:, 1]] = 2.0
+        obs[b[same], pos[same, 0], pos[same, 1]] = 4.0
         return obs.flatten(1)
 
     def _step_grid_positions(self, pos, action, wall):
