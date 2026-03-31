@@ -6,8 +6,8 @@ save_dir: data/multi_maze2d
 gamma: 1.0
 episode_len: 800
 n_mazes: 100000
-grid_size: 7
-observation_shape: [3, 7, 7] # last two same as grid
+grid_size: 3
+observation_shape: [147] # last two are grid_size*2+1
 action_dim: 1
 goal_dim: 2
 

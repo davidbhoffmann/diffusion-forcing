@@ -1,7 +1,7 @@
 """
-This repo is forked from [Boyuan Chen](https://boyuan.space/)'s research 
-template [repo](https://github.com/buoyancy99/research-template). 
-By its MIT license, you must keep the above sentence in `README.md` 
+This repo is forked from [Boyuan Chen](https://boyuan.space/)'s research
+template [repo](https://github.com/buoyancy99/research-template).
+By its MIT license, you must keep the above sentence in `README.md`
 and the `LICENSE` file to credit the author.
 """
 
@@ -38,7 +38,9 @@ class DiffusionForcingBase(BasePytorchAlgo):
         self.sampling_timesteps = cfg.diffusion.sampling_timesteps
         self.clip_noise = cfg.diffusion.clip_noise
 
-        self.cfg.diffusion.cum_snr_decay = self.cfg.diffusion.cum_snr_decay ** (self.frame_stack * cfg.frame_skip)
+        self.cfg.diffusion.cum_snr_decay = self.cfg.diffusion.cum_snr_decay ** (
+            self.frame_stack * cfg.frame_skip
+        )
 
         self.validation_step_outputs = []
         super().__init__(cfg)
@@ -55,7 +57,10 @@ class DiffusionForcingBase(BasePytorchAlgo):
     def configure_optimizers(self):
         params = tuple(self.diffusion_model.parameters())
         optimizer_dynamics = torch.optim.AdamW(
-            params, lr=self.cfg.lr, weight_decay=self.cfg.weight_decay, betas=self.cfg.optimizer_beta
+            params,
+            lr=self.cfg.lr,
+            weight_decay=self.cfg.weight_decay,
+            betas=self.cfg.optimizer_beta,
         )
         return optimizer_dynamics
 
@@ -65,14 +70,18 @@ class DiffusionForcingBase(BasePytorchAlgo):
 
         # manually warm up lr without a scheduler
         if self.trainer.global_step < self.cfg.warmup_steps:
-            lr_scale = min(1.0, float(self.trainer.global_step + 1) / self.cfg.warmup_steps)
+            lr_scale = min(
+                1.0, float(self.trainer.global_step + 1) / self.cfg.warmup_steps
+            )
             for pg in optimizer.param_groups:
                 pg["lr"] = lr_scale * self.cfg.lr
 
     def training_step(self, batch, batch_idx) -> STEP_OUTPUT:
         xs, conditions, masks = self._preprocess_batch(batch)
 
-        xs_pred, loss = self.diffusion_model(xs, conditions, noise_levels=self._generate_noise_levels(xs))
+        xs_pred, loss = self.diffusion_model(
+            xs, conditions, noise_levels=self._generate_noise_levels(xs)
+        )
         loss = self.reweight_loss(loss, masks)
 
         # log the loss
@@ -111,7 +120,9 @@ class DiffusionForcingBase(BasePytorchAlgo):
             assert horizon <= self.n_tokens, "horizon exceeds the number of tokens."
             scheduling_matrix = self._generate_scheduling_matrix(horizon)
 
-            chunk = torch.randn((horizon, batch_size, *self.x_stacked_shape), device=self.device)
+            chunk = torch.randn(
+                (horizon, batch_size, *self.x_stacked_shape), device=self.device
+            )
             chunk = torch.clamp(chunk, -self.clip_noise, self.clip_noise)
             xs_pred = torch.cat([xs_pred, chunk], 0)
 
@@ -126,17 +137,15 @@ class DiffusionForcingBase(BasePytorchAlgo):
             )
 
             for m in range(scheduling_matrix.shape[0] - 1):
-                from_noise_levels = np.concatenate((np.zeros((curr_frame,), dtype=np.int64), scheduling_matrix[m]))[
-                    :, None
-                ].repeat(batch_size, axis=1)
+                from_noise_levels = np.concatenate(
+                    (np.zeros((curr_frame,), dtype=np.int64), scheduling_matrix[m])
+                )[:, None].repeat(batch_size, axis=1)
                 to_noise_levels = np.concatenate(
                     (
                         np.zeros((curr_frame,), dtype=np.int64),
                         scheduling_matrix[m + 1],
                     )
-                )[
-                    :, None
-                ].repeat(batch_size, axis=1)
+                )[:, None].repeat(batch_size, axis=1)
 
                 from_noise_levels = torch.from_numpy(from_noise_levels).to(self.device)
                 to_noise_levels = torch.from_numpy(to_noise_levels).to(self.device)
@@ -169,49 +178,75 @@ class DiffusionForcingBase(BasePytorchAlgo):
     def test_epoch_end(self) -> None:
         self.on_validation_epoch_end(namespace="test")
 
-    def _generate_noise_levels(self, xs: torch.Tensor, masks: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _generate_noise_levels(
+        self, xs: torch.Tensor, masks: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
         Generate noise levels for training.
         """
         num_frames, batch_size, *_ = xs.shape
         match self.cfg.noise_level:
             case "random_all":  # entirely random noise levels
-                noise_levels = torch.randint(0, self.timesteps, (num_frames, batch_size), device=xs.device)
+                noise_levels = torch.randint(
+                    0, self.timesteps, (num_frames, batch_size), device=xs.device
+                )
 
         if masks is not None:
             # for frames that are not available, treat as full noise
-            discard = torch.all(~rearrange(masks.bool(), "(t fs) b -> t b fs", fs=self.frame_stack), -1)
-            noise_levels = torch.where(discard, torch.full_like(noise_levels, self.timesteps - 1), noise_levels)
+            discard = torch.all(
+                ~rearrange(masks.bool(), "(t fs) b -> t b fs", fs=self.frame_stack), -1
+            )
+            noise_levels = torch.where(
+                discard, torch.full_like(noise_levels, self.timesteps - 1), noise_levels
+            )
 
         return noise_levels
 
     def _generate_scheduling_matrix(self, horizon: int):
         match self.cfg.scheduling_matrix:
             case "pyramid":
-                return self._generate_pyramid_scheduling_matrix(horizon, self.uncertainty_scale)
+                return self._generate_pyramid_scheduling_matrix(
+                    horizon, self.uncertainty_scale
+                )
             case "full_sequence":
-                return np.arange(self.sampling_timesteps, -1, -1)[:, None].repeat(horizon, axis=1)
+                return np.arange(self.sampling_timesteps, -1, -1)[:, None].repeat(
+                    horizon, axis=1
+                )
             case "autoregressive":
-                return self._generate_pyramid_scheduling_matrix(horizon, self.sampling_timesteps)
+                return self._generate_pyramid_scheduling_matrix(
+                    horizon, self.sampling_timesteps
+                )
             case "trapezoid":
-                return self._generate_trapezoid_scheduling_matrix(horizon, self.uncertainty_scale)
+                return self._generate_trapezoid_scheduling_matrix(
+                    horizon, self.uncertainty_scale
+                )
 
-    def _generate_pyramid_scheduling_matrix(self, horizon: int, uncertainty_scale: float):
+    def _generate_pyramid_scheduling_matrix(
+        self, horizon: int, uncertainty_scale: float
+    ):
         height = self.sampling_timesteps + int((horizon - 1) * uncertainty_scale) + 1
         scheduling_matrix = np.zeros((height, horizon), dtype=np.int64)
         for m in range(height):
             for t in range(horizon):
-                scheduling_matrix[m, t] = self.sampling_timesteps + int(t * uncertainty_scale) - m
+                scheduling_matrix[m, t] = (
+                    self.sampling_timesteps + int(t * uncertainty_scale) - m
+                )
 
         return np.clip(scheduling_matrix, 0, self.sampling_timesteps)
 
-    def _generate_trapezoid_scheduling_matrix(self, horizon: int, uncertainty_scale: float):
+    def _generate_trapezoid_scheduling_matrix(
+        self, horizon: int, uncertainty_scale: float
+    ):
         height = self.sampling_timesteps + int((horizon + 1) // 2 * uncertainty_scale)
         scheduling_matrix = np.zeros((height, horizon), dtype=np.int64)
         for m in range(height):
             for t in range((horizon + 1) // 2):
-                scheduling_matrix[m, t] = self.sampling_timesteps + int(t * uncertainty_scale) - m
-                scheduling_matrix[m, -t] = self.sampling_timesteps + int(t * uncertainty_scale) - m
+                scheduling_matrix[m, t] = (
+                    self.sampling_timesteps + int(t * uncertainty_scale) - m
+                )
+                scheduling_matrix[m, -t] = (
+                    self.sampling_timesteps + int(t * uncertainty_scale) - m
+                )
 
         return np.clip(scheduling_matrix, 0, self.sampling_timesteps)
 
@@ -236,20 +271,28 @@ class DiffusionForcingBase(BasePytorchAlgo):
         if n_frames % self.frame_stack != 0:
             raise ValueError("Number of frames must be divisible by frame stack size")
         if self.context_frames % self.frame_stack != 0:
-            raise ValueError("Number of context frames must be divisible by frame stack size")
+            raise ValueError(
+                "Number of context frames must be divisible by frame stack size"
+            )
 
         masks = torch.ones(n_frames, batch_size).to(xs.device)
         n_frames = n_frames // self.frame_stack
 
         if self.external_cond_dim:
             conditions = batch[1]
-            conditions = torch.cat([torch.zeros_like(conditions[:, :1]), conditions[:, 1:]], 1)
-            conditions = rearrange(conditions, "b (t fs) d -> t b (fs d)", fs=self.frame_stack).contiguous()
+            conditions = torch.cat(
+                [torch.zeros_like(conditions[:, :1]), conditions[:, 1:]], 1
+            )
+            conditions = rearrange(
+                conditions, "b (t fs) d -> t b (fs d)", fs=self.frame_stack
+            ).contiguous()
         else:
             conditions = [None for _ in range(n_frames)]
 
         xs = self._normalize_x(xs)
-        xs = rearrange(xs, "b (t fs) c ... -> t b (fs c) ...", fs=self.frame_stack).contiguous()
+        xs = rearrange(
+            xs, "b (t fs) c ... -> t b (fs c) ...", fs=self.frame_stack
+        ).contiguous()
 
         return xs, conditions, masks
 
@@ -257,6 +300,7 @@ class DiffusionForcingBase(BasePytorchAlgo):
         shape = [1] * (xs.ndim - self.data_mean.ndim) + list(self.data_mean.shape)
         mean = self.data_mean.reshape(shape)
         std = self.data_std.reshape(shape)
+        print("mean", mean.shape, "std", std.shape, "xs", xs.shape)
         return (xs - mean) / std
 
     def _unnormalize_x(self, xs):

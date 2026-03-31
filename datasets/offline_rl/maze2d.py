@@ -106,8 +106,12 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         self.n_mazes = cfg.n_mazes
         self.grid_size = cfg.grid_size
         if not os.path.exists(cfg.save_dir):
+            os.mkdir(self.save_dir)
             self.generate_data()
-        self.dataset = np.load(os.path.join(self.save_dir, f"{split}.npz"))
+        self.dataset = dict(np.load(os.path.join(self.save_dir, f"{split}.npz")))
+        # Backward-compat: older generated files stored scalar actions as shape (N,)
+        if self.dataset["actions"].ndim == 1:
+            self.dataset["actions"] = self.dataset["actions"][:, None]
         self.gamma = cfg.gamma
         self.n_frames = cfg.episode_len + 1
         self.total_steps = len(self.dataset["observations"])
@@ -154,8 +158,8 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         v_idx = int(n * (train_frac + val_frac))
 
         splits = {
-            "train": mazes[:t_idx],
-            "val": mazes[t_idx:v_idx],
+            "training": mazes[:t_idx],
+            "validation": mazes[t_idx:v_idx],
             "test": mazes[v_idx:],
         }
 
@@ -188,8 +192,8 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
                     o[1, curr[0], curr[1]] = 1.0
                     o[2, goal[0], goal[1]] = 1.0
 
-                    obs.append(o)
-                    acts.append(a)
+                    obs.append(o.flatten())
+                    acts.append([a])
                     rews.append(r)
 
             results[split] = {
@@ -197,7 +201,6 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
                 "actions": np.array(acts),
                 "rewards": np.array(rews),
             }
-
             save_path = os.path.join(self.save_dir, f"{split}.npz")
             np.savez(save_path, **results[split])
 
