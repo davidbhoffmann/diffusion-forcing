@@ -2,6 +2,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from omegaconf import DictConfig
+from maze_dataset import MazeDataset, MazeDatasetConfig
 import matplotlib.pyplot as plt
 import h5py
 from tqdm import tqdm
@@ -42,7 +43,9 @@ class Maze2dOfflineRLDataset(torch.utils.data.Dataset):
         self.gamma = cfg.gamma
         self.n_frames = cfg.episode_len + 1
         self.total_steps = len(self.dataset["observations"])
-        self.dataset["values"] = self.compute_value(self.dataset["rewards"]) * (1 - self.gamma) * 4 - 1
+        self.dataset["values"] = (
+            self.compute_value(self.dataset["rewards"]) * (1 - self.gamma) * 4 - 1
+        )
 
     def compute_value(self, reward):
         # numerical stable way to compute value
@@ -55,16 +58,22 @@ class Maze2dOfflineRLDataset(torch.utils.data.Dataset):
         return self.total_steps - self.n_frames + 1
 
     def __getitem__(self, idx):
-        observation = torch.from_numpy(self.dataset["observations"][idx : idx + self.n_frames]).float()
-        action = torch.from_numpy(self.dataset["actions"][idx : idx + self.n_frames]).float()
-        reward = torch.from_numpy(self.dataset["rewards"][idx : idx + self.n_frames]).float()
-        value = torch.from_numpy(self.dataset["values"][idx : idx + self.n_frames]).float()
+        observation = torch.from_numpy(
+            self.dataset["observations"][idx : idx + self.n_frames]
+        ).float()
+        action = torch.from_numpy(
+            self.dataset["actions"][idx : idx + self.n_frames]
+        ).float()
+        reward = torch.from_numpy(
+            self.dataset["rewards"][idx : idx + self.n_frames]
+        ).float()
+        # value = torch.from_numpy(self.dataset["values"][idx : idx + self.n_frames]).float()
 
         done = np.zeros(self.n_frames, dtype=bool)
         done[-1] = True
         nonterminal = torch.from_numpy(~done)
 
-        goal = torch.zeros((self.n_frames, 0))
+        # goal = torch.zeros((self.n_frames, 0))
 
         return observation, action, reward, nonterminal
 
@@ -87,6 +96,112 @@ class Maze2dOfflineRLDataset(torch.utils.data.Dataset):
             data_dict["terminals"] = data_dict["terminals"][:, 0]
 
         return data_dict
+
+
+class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
+    def __init__(self, cfg: DictConfig, split: str = "training"):
+        super().__init__()
+        self.cfg = cfg
+        self.save_dir = cfg.save_dir
+        self.n_mazes = cfg.n_mazes
+        self.grid_size = cfg.grid_size
+        if not os.path.exists(cfg.save_dir):
+            self.generate_data()
+        self.dataset = np.load(os.path.join(self.save_dir, f"{split}.npz"))
+        self.gamma = cfg.gamma
+        self.n_frames = cfg.episode_len + 1
+        self.total_steps = len(self.dataset["observations"])
+        self.dataset["values"] = (
+            self.compute_value(self.dataset["rewards"]) * (1 - self.gamma) * 4 - 1
+        )
+
+    def compute_value(self, reward):
+        # numerical stable way to compute value
+        value = np.copy(reward)
+        for i in range(len(reward) - 2, -1, -1):
+            value[i] += self.gamma * value[i + 1]
+        return value
+
+    def __len__(self):
+        return self.total_steps - self.n_frames + 1
+
+    def __getitem__(self, idx):
+        observation = torch.from_numpy(
+            self.dataset["observations"][idx : idx + self.n_frames]
+        ).float()
+        action = torch.from_numpy(
+            self.dataset["actions"][idx : idx + self.n_frames]
+        ).float()
+        reward = torch.from_numpy(
+            self.dataset["rewards"][idx : idx + self.n_frames]
+        ).float()
+
+        done = np.zeros(self.n_frames, dtype=bool)
+        done[-1] = True
+        nonterminal = torch.from_numpy(~done)
+
+        return observation, action, reward, nonterminal
+
+    def generate_data(self, train_frac=0.8, val_frac=0.1):
+        cfg = MazeDatasetConfig(
+            name="base", grid_n=self.grid_size, n_mazes=self.n_mazes
+        )
+        mazes = list(MazeDataset.from_config(cfg))
+        np.random.shuffle(mazes)
+
+        n = self.n_mazes
+        t_idx = int(n * train_frac)
+        v_idx = int(n * (train_frac + val_frac))
+
+        splits = {
+            "train": mazes[:t_idx],
+            "val": mazes[t_idx:v_idx],
+            "test": mazes[v_idx:],
+        }
+
+        results = {}
+        for split, split_mazes in splits.items():
+            obs, acts, rews = [], [], []
+
+            for maze in split_mazes:
+                grid = maze.as_pixels(False, False)[:, :, 2]
+                path_pixels = [(r * 2 + 1, c * 2 + 1) for r, c in maze.solution]
+                goal = path_pixels[-1]
+
+                for i, curr in enumerate(path_pixels):
+                    if i < len(path_pixels) - 1:
+                        nxt = path_pixels[i + 1]
+                        if nxt[0] < curr[0]:
+                            a = 0
+                        elif nxt[0] > curr[0]:
+                            a = 1
+                        elif nxt[1] < curr[1]:
+                            a = 2
+                        else:
+                            a = 3
+                        r = 0.0
+                    else:
+                        a, r = 0, 1.0
+
+                    o = np.zeros((3, grid.shape[0], grid.shape[1]), dtype=np.float32)
+                    o[0] = grid
+                    o[1, curr[0], curr[1]] = 1.0
+                    o[2, goal[0], goal[1]] = 1.0
+
+                    obs.append(o)
+                    acts.append(a)
+                    rews.append(r)
+
+            results[split] = {
+                "observations": np.stack(obs) if obs else np.array([]),
+                "actions": np.array(acts),
+                "rewards": np.array(rews),
+            }
+
+            save_path = os.path.join(self.save_dir, f"{split}.npz")
+            np.savez(save_path, **results[split])
+
+        return results
 
 
 if __name__ == "__main__":
@@ -117,17 +232,23 @@ if __name__ == "__main__":
     for i, row in enumerate(grid):
         for j, cell in enumerate(row):
             if cell == "#":
-                square = plt.Rectangle((i + 0.5, j + 0.5), 1, 1, edgecolor="black", facecolor="black")
+                square = plt.Rectangle(
+                    (i + 0.5, j + 0.5), 1, 1, edgecolor="black", facecolor="black"
+                )
                 plt.gca().add_patch(square)
 
     start_x, start_y = o[..., 0, :2]
-    start_circle = plt.Circle((start_x, start_y), 0.16, facecolor="white", edgecolor="black")
+    start_circle = plt.Circle(
+        (start_x, start_y), 0.16, facecolor="white", edgecolor="black"
+    )
     plt.gca().add_patch(start_circle)
     inner_circle = plt.Circle((start_x, start_y), 0.08, color="black")
     plt.gca().add_patch(inner_circle)
 
     def draw_star(center, radius, num_points=5, color="black"):
-        angles = np.linspace(0.0, 2 * np.pi, num_points, endpoint=False) + 5 * np.pi / (2 * num_points)
+        angles = np.linspace(0.0, 2 * np.pi, num_points, endpoint=False) + 5 * np.pi / (
+            2 * num_points
+        )
         inner_radius = radius / 2.0
 
         points = []
@@ -145,7 +266,9 @@ if __name__ == "__main__":
         plt.gca().add_patch(star)
 
     goal_x, goal_y = o[..., -1, :2]
-    goal_circle = plt.Circle((goal_x, goal_y), 0.16, facecolor="white", edgecolor="black")
+    goal_circle = plt.Circle(
+        (goal_x, goal_y), 0.16, facecolor="white", edgecolor="black"
+    )
     plt.gca().add_patch(goal_circle)
     draw_star((goal_x, goal_y), radius=0.08)
 
@@ -157,7 +280,14 @@ if __name__ == "__main__":
     plt.xlim([0.5, len(grid) + 0.5])
     plt.ylim([0.5, len(grid[0]) + 0.5])
     plt.tick_params(
-        axis="both", which="both", bottom=False, top=False, left=False, right=False, labelbottom=False, labelleft=False
+        axis="both",
+        which="both",
+        bottom=False,
+        top=False,
+        left=False,
+        right=False,
+        labelbottom=False,
+        labelleft=False,
     )
     plt.grid(True, color="white", which="minor", linewidth=4)
     plt.gca().spines["top"].set_linewidth(4)

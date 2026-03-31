@@ -1,1 +1,1 @@
-from .maze2d import Maze2dOfflineRLDataset
+from .maze2d import Maze2dOfflineRLDataset, MultiMaze2dOfflineRLDataset
