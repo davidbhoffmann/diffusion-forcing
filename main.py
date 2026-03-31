@@ -1,10 +1,10 @@
 """
-This repo is forked from [Boyuan Chen](https://boyuan.space/)'s research 
-template [repo](https://github.com/buoyancy99/research-template). 
-By its MIT license, you must keep the above sentence in `README.md` 
+This repo is forked from [Boyuan Chen](https://boyuan.space/)'s research
+template [repo](https://github.com/buoyancy99/research-template).
+By its MIT license, you must keep the above sentence in `README.md`
 and the `LICENSE` file to credit the author.
 
-Main file for the project. This will create and run new experiments and load checkpoints from wandb. 
+Main file for the project. This will create and run new experiments and load checkpoints from wandb.
 Borrowed part of the code from David Charatan and wandb.
 """
 
@@ -45,13 +45,19 @@ def run_local(cfg: DictConfig):
     if is_rank_zero:
         print(cyan(f"Outputs will be saved to:"), output_dir)
         (output_dir.parents[1] / "latest-run").unlink(missing_ok=True)
-        (output_dir.parents[1] / "latest-run").symlink_to(output_dir, target_is_directory=True)
+        (output_dir.parents[1] / "latest-run").symlink_to(
+            output_dir, target_is_directory=True
+        )
 
     # Set up logging with wandb.
     if cfg.wandb.mode != "disabled":
         # If resuming, merge into the existing run on wandb.
         resume = cfg.get("resume", None)
-        name = f"{cfg.name} ({output_dir.parent.name}/{output_dir.name})" if resume is None else None
+        name = (
+            f"{cfg.name} ({output_dir.parent.name}/{output_dir.name})"
+            if resume is None
+            else None
+        )
 
         if "_on_compute_node" in cfg and cfg.cluster.is_compute_node_offline:
             logger_cls = OfflineWandbLogger
@@ -113,8 +119,14 @@ def run_slurm(cfg: DictConfig):
         project_root,
     )
 
-    if "cluster" in cfg and cfg.cluster.is_compute_node_offline and cfg.wandb.mode == "online":
-        print("Job submitted to a compute node without internet. This requires manual syncing on login node.")
+    if (
+        "cluster" in cfg
+        and cfg.cluster.is_compute_node_offline
+        and cfg.wandb.mode == "online"
+    ):
+        print(
+            "Job submitted to a compute node without internet. This requires manual syncing on login node."
+        )
         osh_command_dir = project_root / ".wandb_osh_command_dir"
 
         osh_proc = None
@@ -133,13 +145,17 @@ def run_slurm(cfg: DictConfig):
     )
     msg = f"tail -f {slurm_log_dir}/* \n"
     try:
-        while not list(slurm_log_dir.glob("*.out")) and not list(slurm_log_dir.glob("*.err")):
+        while not list(slurm_log_dir.glob("*.out")) and not list(
+            slurm_log_dir.glob("*.err")
+        ):
             time.sleep(1)
         print(cyan("To trace the outputs and errors, run the following command:"), msg)
     except KeyboardInterrupt:
         print("Keyboard interrupt detected. Exiting...")
         print(
-            cyan("To trace the outputs and errors, manually wait for the job to start and run the following command:"),
+            cyan(
+                "To trace the outputs and errors, manually wait for the job to start and run the following command:"
+            ),
             msg,
         )
 
@@ -156,7 +172,9 @@ def run(cfg: DictConfig):
                 cfg.wandb.mode = "offline"
 
     if "name" not in cfg:
-        raise ValueError("must specify a name for the run with command line argument '+name=[name]'")
+        raise ValueError(
+            "must specify a name for the run with command line argument '+name=[name]'"
+        )
 
     if not cfg.wandb.get("entity", None):
         raise ValueError(
@@ -190,7 +208,11 @@ def run(cfg: DictConfig):
         download_latest_checkpoint(run_path, Path("outputs/downloaded"))
 
     if "cluster" in cfg and not "_on_compute_node" in cfg:
-        print(cyan("Slurm detected, submitting to compute node instead of running locally..."))
+        print(
+            cyan(
+                "Slurm detected, submitting to compute node instead of running locally..."
+            )
+        )
         run_slurm(cfg)
     else:
         run_local(cfg)

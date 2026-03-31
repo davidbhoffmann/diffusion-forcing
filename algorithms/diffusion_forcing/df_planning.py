@@ -11,15 +11,18 @@ from PIL import Image
 from .df_base import DiffusionForcingBase
 from utils.logging_utils import (
     make_trajectory_images,
-    get_random_start_goal,
 )
 
 
 class DiffusionForcingPlanning(DiffusionForcingBase):
     def __init__(self, cfg: DictConfig):
         self.env_id = cfg.env_id
-        self.action_dim = len(cfg.action_mean)
-        self.observation_dim = len(cfg.observation_mean)
+        self.observation_mean = np.array(cfg.observation_mean).reshape(-1)
+        self.observation_std = np.array(cfg.observation_std).reshape(-1)
+        self.action_mean = np.array(cfg.action_mean).reshape(-1)
+        self.action_std = np.array(cfg.action_std).reshape(-1)
+        self.action_dim = int(self.action_mean.shape[0])
+        self.observation_dim = int(self.observation_mean.shape[0])
         self.use_reward = cfg.use_reward
         self.unstacked_dim = (
             self.observation_dim + self.action_dim + int(self.use_reward)
@@ -30,14 +33,15 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         self.gamma = cfg.gamma
         self.reward_mean = cfg.reward_mean
         self.reward_std = cfg.reward_std
-        self.observation_mean = np.array(cfg.observation_mean[: self.observation_dim])
-        self.observation_std = np.array(cfg.observation_std[: self.observation_dim])
-        self.action_mean = np.array(cfg.action_mean[: self.action_dim])
-        self.action_std = np.array(cfg.action_std[: self.action_dim])
         self.open_loop_horizon = cfg.open_loop_horizon
         self.padding_mode = cfg.padding_mode
         super().__init__(cfg)
         self.plot_end_points = cfg.plot_start_goal and self.guidance_scale != 0
+        self.plot_env_id = (
+            self.env_id
+            if any(k in self.env_id for k in ("umaze", "medium", "large"))
+            else "array_dataset"
+        )
 
     def _build_model(self):
         # Added flatten to support non 1D inputs
@@ -131,11 +135,10 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         # Visualization, including masked out entries
         if self.global_step % 10000 == 0:
             o, a, r = self.split_bundle(xs_pred)
-            trajectory = (
-                o.detach().cpu().numpy()[:-1, :8]
-            )  # last observation is dummy, sample 8
+            trajectory = self._observations_to_xy(o).detach().cpu().numpy()[:-1, :8]
+            # last observation is dummy, sample 8
             images = make_trajectory_images(
-                self.env_id, trajectory, trajectory.shape[1], None, None, False
+                self.plot_env_id, trajectory, trajectory.shape[1], None, None, False
             )
             for i, img in enumerate(images):
                 self.log_image(
@@ -160,11 +163,9 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         horizon = self.episode_len
         if self.action_dim != 2:
             self.eval_planning(
-                batch_size, conditions, horizon, namespace + str(horizon)
+                batch, conditions, horizon, namespace + str(horizon)
             )  # can run planning without environment installation
-        self.interact(
-            batch_size, conditions, namespace
-        )  # interact if environment is installation
+        self.interact(batch, conditions, namespace)
 
     def plan(
         self,
@@ -302,26 +303,17 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         return plan_hist
 
     def eval_planning(
-        self, batch_size: int, conditions=None, horizon=None, namespace="validation"
+        self, batch, conditions=None, horizon=None, namespace="validation"
     ):
-        start, goal = get_random_start_goal(self.env_id, batch_size)
-
-        start_normalized = torch.from_numpy(start).float().to(self.device)
-        start_normalized = torch.cat(
-            [start_normalized, torch.zeros_like(start_normalized)], -1
+        start_obs, goal_obs, start_xy, goal_xy = self._extract_start_goal_from_batch(
+            batch
         )
-        start_normalized = start_normalized[:, : self.observation_dim]
+
         start_normalized = self.split_bundle(
-            self._normalize_x(self.make_bundle(start_normalized))
+            self._normalize_x(self.make_bundle(start_obs))
         )[0]
-
-        goal_normalized = torch.from_numpy(goal).float().to(self.device)
-        goal_normalized = torch.cat(
-            [goal_normalized, torch.zeros_like(goal_normalized)], -1
-        )
-        goal_normalized = goal_normalized[:, : self.observation_dim]
         goal_normalized = self.split_bundle(
-            self._normalize_x(self.make_bundle(goal_normalized))
+            self._normalize_x(self.make_bundle(goal_obs))
         )[0]
 
         horizon = self.episode_len if horizon is None else horizon
@@ -331,9 +323,14 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
 
         # Visualization
         o, _, _ = self.split_bundle(plan)
-        o = o.detach().cpu().numpy()[:-1, :16]  # last observation is dummy
+        o_xy = self._observations_to_xy(o).detach().cpu().numpy()[:-1, :16]
         images = make_trajectory_images(
-            self.env_id, o, o.shape[1], start, goal, self.plot_end_points
+            self.plot_env_id,
+            o_xy,
+            o_xy.shape[1],
+            start_xy[:16].tolist(),
+            goal_xy[:16].tolist(),
+            self.plot_end_points,
         )
         for i, img in enumerate(images):
             self.log_image(
@@ -341,7 +338,16 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
                 Image.fromarray(img),
             )
 
-    def interact(self, batch_size: int, conditions=None, namespace="validation"):
+    def interact(self, batch, conditions=None, namespace="validation"):
+        start_obs, goal_obs, start_xy, goal_xy = self._extract_start_goal_from_batch(
+            batch
+        )
+        if self._is_grid_observation():
+            self._interact_grid(
+                start_obs, goal_obs, start_xy, goal_xy, conditions, namespace
+            )
+            return
+
         try:
             import d4rl
             import gym
@@ -366,6 +372,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
             )
             use_diffused_action = True
 
+        batch_size = start_obs.shape[0]
         envs = DummyVecEnv([lambda: gym.make(self.env_id)] * batch_size)
         envs.seed(0)
 
@@ -453,9 +460,164 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         start = start[:, :2].cpu().numpy().tolist()
         goal = goal[:, :2].cpu().numpy().tolist()
         images = make_trajectory_images(
-            self.env_id, trajectory, samples, start, goal, self.plot_end_points
+            self.plot_env_id, trajectory, samples, start, goal, self.plot_end_points
         )
 
+        for i, img in enumerate(images):
+            self.log_image(
+                f"{namespace}_interaction/sample_{i}",
+                Image.fromarray(img),
+            )
+
+    def _is_grid_observation(self):
+        if self.observation_dim % 3 != 0:
+            return False
+        side_sq = self.observation_dim // 3
+        side = int(np.sqrt(side_sq))
+        return side * side == side_sq
+
+    def _grid_side(self):
+        return int(np.sqrt(self.observation_dim // 3))
+
+    def _extract_start_goal_from_batch(self, batch):
+        observations = batch[0][..., : self.observation_dim].float().to(self.device)
+        start_obs = observations[:, 0]
+        goal_obs = observations[:, -1]
+        start_xy = self._observations_to_xy(start_obs).detach().cpu().numpy()
+        goal_xy = self._goals_to_xy(goal_obs).detach().cpu().numpy()
+        return start_obs, goal_obs, start_xy, goal_xy
+
+    def _observations_to_xy(self, obs):
+        if not self._is_grid_observation():
+            return obs[..., :2]
+        side = self._grid_side()
+        flat = obs.reshape(*obs.shape[:-1], 3, side, side)[..., 1, :, :].reshape(
+            *obs.shape[:-1], -1
+        )
+        idx = flat.argmax(-1)
+        x = (idx // side).float()
+        y = (idx % side).float()
+        return torch.stack([x, y], -1)
+
+    def _goals_to_xy(self, obs):
+        if not self._is_grid_observation():
+            return obs[..., :2]
+        side = self._grid_side()
+        flat = obs.reshape(*obs.shape[:-1], 3, side, side)[..., 2, :, :].reshape(
+            *obs.shape[:-1], -1
+        )
+        idx = flat.argmax(-1)
+        x = (idx // side).float()
+        y = (idx % side).float()
+        return torch.stack([x, y], -1)
+
+    def _decode_grid(self, obs):
+        side = self._grid_side()
+        grid = obs.reshape(obs.shape[0], 3, side, side)
+        wall = grid[:, 0] >= 254.0
+        pos = self._observations_to_xy(obs).long()
+        goal = self._goals_to_xy(obs).long()
+        return wall, pos, goal
+
+    def _encode_grid(self, wall, pos, goal):
+        batch_size, side, _ = wall.shape
+        obs = torch.zeros((batch_size, 3, side, side), device=wall.device)
+        obs[:, 0] = wall.float() * 255.0
+        b = torch.arange(batch_size, device=wall.device)
+        obs[b, 1, pos[:, 0], pos[:, 1]] = 1.0
+        obs[b, 2, goal[:, 0], goal[:, 1]] = 1.0
+        return obs.flatten(1)
+
+    def _step_grid_positions(self, pos, action, wall):
+        next_pos = pos.clone()
+        next_pos[action == 0, 0] -= 1
+        next_pos[action == 1, 0] += 1
+        next_pos[action == 2, 1] -= 1
+        next_pos[action == 3, 1] += 1
+        next_pos[:, 0] = next_pos[:, 0].clamp(0, wall.shape[1] - 1)
+        next_pos[:, 1] = next_pos[:, 1].clamp(0, wall.shape[2] - 1)
+        blocked = wall[
+            torch.arange(wall.shape[0], device=wall.device),
+            next_pos[:, 0],
+            next_pos[:, 1],
+        ]
+        next_pos[blocked] = pos[blocked]
+        return next_pos
+
+    def _interact_grid(
+        self, start_obs, goal_obs, start_xy, goal_xy, conditions, namespace
+    ):
+        print("Interacting with array-grid dynamics (no gym dependency).")
+
+        batch_size = start_obs.shape[0]
+        obs_mean = self.data_mean[: self.observation_dim]
+        obs_std = self.data_std[: self.observation_dim]
+
+        obs = start_obs.detach().clone()
+        goal_obs = goal_obs.detach().clone()
+        wall, pos, goal = self._decode_grid(obs)
+        obs_normalized = ((obs - obs_mean[None]) / obs_std[None]).detach()
+        goal_normalized = ((goal_obs - obs_mean[None]) / obs_std[None]).detach()
+
+        steps = 0
+        episode_reward = np.zeros(batch_size)
+        episode_reward_if_stay = np.zeros(batch_size)
+        reached = np.zeros(batch_size, dtype=bool)
+        first_reach = np.zeros(batch_size)
+
+        trajectory = []
+        terminate = False
+        while not terminate and steps < self.episode_len:
+            plan_hist = self.plan(
+                obs_normalized, goal_normalized, self.episode_len - steps, conditions
+            )
+            plan_hist = self._unnormalize_x(plan_hist)
+            plan = plan_hist[-1]
+
+            for t in range(self.open_loop_horizon):
+                if t >= plan.shape[0]:
+                    terminate = True
+                    break
+                _, action, _ = self.split_bundle(plan[t])
+                action_discrete = torch.round(action[:, 0]).long().clamp(0, 3)
+                pos = self._step_grid_positions(pos, action_discrete, wall)
+                reward_t = (pos == goal).all(-1).float()
+
+                reward_np = reward_t.detach().cpu().numpy()
+                reached = np.logical_or(reached, reward_np >= 1.0)
+                episode_reward += reward_np
+                episode_reward_if_stay += np.where(~reached, reward_np, 1)
+                first_reach += ~reached
+
+                obs = self._encode_grid(wall, pos, goal)
+                obs_normalized = ((obs - obs_mean[None]) / obs_std[None]).detach()
+                trajectory.append(
+                    self.make_bundle(obs, action, reward_t[:, None]).cpu()
+                )
+
+                steps += 1
+                if reward_t.any() or steps >= self.episode_len:
+                    terminate = True
+                    break
+
+        self.log(f"{namespace}/episode_reward", episode_reward.mean())
+        self.log(f"{namespace}/episode_reward_if_stay", episode_reward_if_stay.mean())
+        self.log(f"{namespace}/first_reach", first_reach.mean())
+
+        if not trajectory:
+            return
+
+        samples = min(16, batch_size)
+        trajectory = torch.stack(trajectory)
+        traj_xy = self._observations_to_xy(self.split_bundle(trajectory)[0]).numpy()
+        images = make_trajectory_images(
+            self.plot_env_id,
+            traj_xy,
+            samples,
+            start_xy.tolist(),
+            goal_xy.tolist(),
+            self.plot_end_points,
+        )
         for i, img in enumerate(images):
             self.log_image(
                 f"{namespace}_interaction/sample_{i}",
