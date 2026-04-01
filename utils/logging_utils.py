@@ -176,7 +176,11 @@ def get_random_start_goal(env_id, batch_size):
 def plot_maze_layout(ax, maze_grid):
     ax.clear()
 
+    n_rows = None
+    n_cols = None
     if maze_grid is not None:
+        n_rows = len(maze_grid)
+        n_cols = len(maze_grid[0]) if n_rows > 0 else 0
         for i, row in enumerate(maze_grid):
             for j, cell in enumerate(row):
                 if cell == "#":
@@ -203,10 +207,13 @@ def plot_maze_layout(ax, maze_grid):
         labelbottom=False,
         labelleft=False,
     )
-    ax.set_xticks(np.arange(0.5, len(maze_grid) + 0.5))
-    ax.set_yticks(np.arange(0.5, len(maze_grid[0]) + 0.5))
-    ax.set_xlim(0.5, len(maze_grid) + 0.5)
-    ax.set_ylim(0.5, len(maze_grid[0]) + 0.5)
+
+    # For non-grid envs we don't have maze dimensions; let matplotlib autoscale.
+    if n_rows is not None and n_cols is not None and n_rows > 0 and n_cols > 0:
+        ax.set_xticks(np.arange(0.5, n_rows + 0.5))
+        ax.set_yticks(np.arange(0.5, n_cols + 0.5))
+        ax.set_xlim(0.5, n_rows + 0.5)
+        ax.set_ylim(0.5, n_cols + 0.5)
     ax.grid(True, color="white", which="minor", linewidth=4)
 
 
