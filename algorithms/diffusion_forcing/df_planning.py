@@ -542,10 +542,54 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
     def _extract_start_goal_from_batch(self, batch):
         observations = batch[0][..., : self.observation_dim].float().to(self.device)
         start_obs = observations[:, 0]
-        goal_obs = observations[:, -1]
+
+        # For grid datasets, sequence windows can cross trajectory boundaries in the
+        # flattened replay buffer. Always derive goal from the same maze state as start.
+        if self._is_grid_observation():
+            wall, pos, goal = self._decode_grid(start_obs)
+            pos, goal = self._project_positions_to_free_cells(wall, pos, goal)
+            start_obs = self._encode_grid(wall, pos, goal)
+            goal_obs = self._encode_grid(wall, goal, goal)
+        else:
+            goal_obs = observations[:, -1]
+
         start_xy = self._observations_to_xy(start_obs).detach().cpu().numpy()
         goal_xy = self._goals_to_xy(goal_obs).detach().cpu().numpy()
         return start_obs, goal_obs, start_xy, goal_xy
+
+    def _nearest_free_cell(self, wall, target):
+        side_x, side_y = wall.shape
+        tx, ty = int(target[0].item()), int(target[1].item())
+        tx = int(np.clip(tx, 0, side_x - 1))
+        ty = int(np.clip(ty, 0, side_y - 1))
+
+        if not bool(wall[tx, ty].item()):
+            return torch.tensor([tx, ty], device=wall.device, dtype=torch.long)
+
+        max_radius = side_x + side_y
+        for radius in range(1, max_radius + 1):
+            x0 = max(0, tx - radius)
+            x1 = min(side_x - 1, tx + radius)
+            y0 = max(0, ty - radius)
+            y1 = min(side_y - 1, ty + radius)
+            for x in range(x0, x1 + 1):
+                for y in range(y0, y1 + 1):
+                    if abs(x - tx) + abs(y - ty) != radius:
+                        continue
+                    if not bool(wall[x, y].item()):
+                        return torch.tensor(
+                            [x, y], device=wall.device, dtype=torch.long
+                        )
+
+        return torch.tensor([tx, ty], device=wall.device, dtype=torch.long)
+
+    def _project_positions_to_free_cells(self, wall, pos, goal):
+        pos_fixed = pos.clone().long()
+        goal_fixed = goal.clone().long()
+        for b in range(wall.shape[0]):
+            pos_fixed[b] = self._nearest_free_cell(wall[b], pos_fixed[b])
+            goal_fixed[b] = self._nearest_free_cell(wall[b], goal_fixed[b])
+        return pos_fixed, goal_fixed
 
     def _observations_to_xy(self, obs):
         if not self._is_grid_observation():
@@ -682,6 +726,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         first_reach = np.zeros(batch_size)
 
         trajectory = []
+        traj_xy = []
         terminate = False
         while not terminate and steps < self.episode_len:
             plan_hist = self.plan(
@@ -710,6 +755,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
                 trajectory.append(
                     self.make_bundle(obs, action, reward_t[:, None]).cpu()
                 )
+                traj_xy.append(pos.detach().cpu().float())
 
                 steps += 1
                 if reward_t.all() or steps >= self.episode_len:
@@ -725,7 +771,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
 
         samples = min(16, batch_size)
         trajectory = torch.stack(trajectory)
-        traj_xy = self._observations_to_xy(self.split_bundle(trajectory)[0]).numpy()
+        traj_xy = torch.stack(traj_xy).numpy()
         images = make_trajectory_images(
             self.plot_env_id,
             traj_xy,
