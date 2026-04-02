@@ -255,12 +255,20 @@ def plot_start_goal(ax, start_goal: None):
 
 
 def make_trajectory_images(
-    env_id, trajectory, batch_size, start, goal, plot_end_points=True
+    env_id,
+    trajectory,
+    batch_size,
+    start,
+    goal,
+    plot_end_points=True,
+    maze_grids=None,
 ):
     images = []
     for batch_idx in range(batch_size):
         fig, ax = plt.subplots()
-        if is_grid_env(env_id):
+        if maze_grids is not None:
+            maze_grid = maze_grids[batch_idx]
+        elif is_grid_env(env_id):
             maze_grid = get_maze_grid(env_id)
         else:
             maze_grid = None

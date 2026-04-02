@@ -367,6 +367,10 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         # Visualization
         o, _, _ = self.split_bundle(plan)
         o_xy = self._observations_to_xy(o).detach().cpu().numpy()[:-1, :16]
+        maze_grids = None
+        if self._is_grid_observation():
+            wall, _, _ = self._decode_grid(start_obs)
+            maze_grids = self._walls_to_maze_grids(wall[: o_xy.shape[1]])
         images = make_trajectory_images(
             self.plot_env_id,
             o_xy,
@@ -374,6 +378,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
             start_xy[:16].tolist(),
             goal_xy[:16].tolist(),
             self.plot_end_points,
+            maze_grids=maze_grids,
         )
         for i, img in enumerate(images):
             self.log_image(
@@ -625,6 +630,20 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         obs[b[same], pos[same, 0], pos[same, 1]] = 4.0
         return obs.flatten(1)
 
+    def _walls_to_maze_grids(self, wall):
+        wall_np = wall.detach().cpu().numpy()
+        maze_grids = []
+        for sample in wall_np:
+            maze_grids.append(
+                [
+                    "".join(
+                        "#" if sample[i, j] else "O" for j in range(sample.shape[1])
+                    )
+                    for i in range(sample.shape[0])
+                ]
+            )
+        return maze_grids
+
     def _step_grid_positions(self, pos, action, wall):
         next_pos = pos.clone()
         next_pos[action == 0, 0] -= 1
@@ -693,7 +712,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
                 )
 
                 steps += 1
-                if reward_t.any() or steps >= self.episode_len:
+                if reward_t.all() or steps >= self.episode_len:
                     terminate = True
                     break
 
@@ -714,6 +733,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
             start_xy.tolist(),
             goal_xy.tolist(),
             self.plot_end_points,
+            maze_grids=self._walls_to_maze_grids(wall[:samples]),
         )
         for i, img in enumerate(images):
             self.log_image(
