@@ -25,6 +25,7 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         self.save_dir = cfg.save_dir
         self.n_mazes = cfg.n_mazes
         self.maze_size = cfg.maze_size
+        self.gird_size = self.maze_size * 2 + 1
         self.gamma = cfg.gamma
         self.n_frames = cfg.episode_len + 1
         Path(self.save_dir).mkdir(parents=True, exist_ok=True)
@@ -191,14 +192,30 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         with np.load(dataset_paths[self.split]) as raw:
             dataset = {k: raw[k] for k in raw.files}
 
-        print(dataset.keys())
-
         if dataset["actions"].shape[-1] - 2  != self.n_frames:
             raise RuntimeError(
-                "Dataset shape does not match n_frames specified in the config.\n"
+                "Dataset shape does not match n_frames or action_dim specified in the config.\n"
                 f"-> Actions shape: {dataset['actions'].shape}\n"
                 f"-> Positions shape: {dataset['positions'].shape}\n"
                 f"-> N frames: {self.n_frames}"
+            )
+        if dataset["grids"].shape[1:] != (self.gird_size, self.gird_size):
+            raise RuntimeError(
+                "Dataset grid size does't match the cfg.\n"
+                f"-> Dataset grid shape: {dataset['grids'].shape}\n"
+                f"-> Config grid shape: {(self.gird_size, self.gird_size)}"
+            )
+        if dataset["positions"].shape[-1] != self.cfg.observation_shape:
+            raise RuntimeError(
+                "Dataset observation size does't match the cfg.\n"
+                f"-> Dataset observation shape: {dataset['positions'].shape}\n"
+                f"-> Config grobservationid shape: {self.cfg.observation_shape}"
+            )
+        if dataset["goals"].shape[-1] != self.cfg.goal_dim:
+            raise RuntimeError(
+                "Dataset goal size does't match the cfg.\n"
+                f"-> Dataset goal ervation shape: {dataset['goals'].shape}\n"
+                f"-> Config goal shape: {self.cfg.goal_dim}"
             )
         return dataset
         
