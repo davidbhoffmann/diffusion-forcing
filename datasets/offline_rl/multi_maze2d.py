@@ -114,11 +114,11 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
 
         # rewards = torch.zeros_like(positions).float()
         # rewards[-1] = 1.0
-        nonterminal = torch.ones_like(positions).bool()
-        nonterminal[-1] = False
+        nonterminals = torch.ones_like(positions).bool()
+        nonterminals[-1] = False
 
         # return observation, action, reward, nonterminal
-        return maze, goal, positions, actions, rewards, nonterminal
+        return maze, goal, positions, actions, rewards, nonterminals
 
         
         
@@ -260,6 +260,8 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
                 grids.append(wall_mask.astype(np.uint8))
                 goals.append(goal) 
                 # TODO: check if fixing trajectory length leads to problems
+                # Could also take trajectories longer than n_frames and take an n_frame 
+                # slice out of them. Sequences wouldn't always end in goal.
                 paths_tree, start_nodes = get_solutions_tree(maze, goal, self.n_frames-1)
                 for start_node in start_nodes:
                     curr = tuple(start_node)
@@ -414,7 +416,7 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
             self.cfg.action_std = action_std.tolist()
             self.cfg.reward_mean = reward_mean
             self.cfg.reward_std = reward_std
-            self.cfg.grid_shape = grids.shape
+            self.cfg.grid_shape = int(grids.shape[-1])
             self.cfg._runtime_stats_initialized = True
 
 
