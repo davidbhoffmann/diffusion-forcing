@@ -199,7 +199,7 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
                 f"-> Positions shape: {dataset['positions'].shape}\n"
                 f"-> N frames: {self.n_frames}"
             )
-        if dataset["grids"].shape[1:] != (self.gird_size, self.gird_size):
+        if dataset["grids"].shape[-1] != self.gird_size**2:
             raise RuntimeError(
                 "Dataset grid size does't match the cfg.\n"
                 f"-> Dataset grid shape: {dataset['grids'].shape}\n"
@@ -255,6 +255,7 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
             for grid_id, maze in enumerate(split_mazes):
                 pixels = maze.as_pixels(False, False)
                 wall_mask = pixels[..., 0] == 255
+                wall_mask = wall_mask.reshape(-1)
                 goal = tuple(maze.end_pos)
                 grids.append(wall_mask.astype(np.uint8))
                 goals.append(goal) 
@@ -392,6 +393,7 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
             actions = actions[idx]
             rewards = rewards[idx]
 
+
         observation_mean = positions.mean(axis=0)
         observation_std = positions.std(axis=0)
         observation_std = np.where(np.abs(observation_std) < 1e-6, 1.0, observation_std)
@@ -405,13 +407,14 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         if abs(reward_std) < 1e-6: reward_std = 1.0
 
         with open_dict(self.cfg):
-            self.cfg.observation_shape = [int(positions.shape[-1])]
+            self.cfg.observation_shape = int(positions.shape[-1])
             self.cfg.observation_mean = observation_mean.tolist()
             self.cfg.observation_std = observation_std.tolist()
             self.cfg.action_mean = action_mean.tolist()
             self.cfg.action_std = action_std.tolist()
             self.cfg.reward_mean = reward_mean
             self.cfg.reward_std = reward_std
+            self.cfg.grid_shape = grids.shape
             self.cfg._runtime_stats_initialized = True
 
 

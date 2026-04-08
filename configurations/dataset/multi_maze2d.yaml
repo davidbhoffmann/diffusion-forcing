@@ -7,6 +7,6 @@ gamma: 1.0
 episode_len: 4
 n_mazes: 100000
 maze_size: 3
-observation_shape: [49] # flattened single-channel grid, side=(2*grid_size+1)
+observation_shape: 2 
 action_dim: 1
 goal_dim: 2
