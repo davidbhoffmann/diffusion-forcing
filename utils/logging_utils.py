@@ -60,7 +60,9 @@ def log_video(
         observation_gt[:, :, i, [0, -1], :] = c
         observation_gt[:, :, i, :, [0, -1]] = c
     video = torch.cat([observation_hat, observation_gt], -1).detach().cpu().numpy()
-    video = np.transpose(np.clip(video, a_min=0.0, a_max=1.0) * 255, (1, 0, 2, 3, 4)).astype(np.uint8)
+    video = np.transpose(
+        np.clip(video, a_min=0.0, a_max=1.0) * 255, (1, 0, 2, 3, 4)
+    ).astype(np.uint8)
     # video[..., 1:] = video[..., :1]  # remove framestack, only visualize current frame
     n_samples = len(video)
     # use wandb directly here since pytorch lightning doesn't support logging videos yet
@@ -90,7 +92,9 @@ def get_validation_metrics_for_videos(
     """
     frame, batch, channel, height, width = observation_hat.shape
     output_dict = {}
-    observation_gt = observation_gt.type_as(observation_hat)  # some metrics don't fully support fp16
+    observation_gt = observation_gt.type_as(
+        observation_hat
+    )  # some metrics don't fully support fp16
 
     if frame < 9:
         fvd_model = None  # FVD requires at least 9 frames
@@ -106,8 +110,12 @@ def get_validation_metrics_for_videos(
     observation_gt = observation_gt.view(-1, channel, height, width)
 
     output_dict["mse"] = mean_squared_error(observation_hat, observation_gt)
-    output_dict["psnr"] = peak_signal_noise_ratio(observation_hat, observation_gt, data_range=2.0)
-    output_dict["ssim"] = structural_similarity_index_measure(observation_hat, observation_gt, data_range=2.0)
+    output_dict["psnr"] = peak_signal_noise_ratio(
+        observation_hat, observation_gt, data_range=2.0
+    )
+    output_dict["ssim"] = structural_similarity_index_measure(
+        observation_hat, observation_gt, data_range=2.0
+    )
     output_dict["uiqi"] = universal_image_quality_index(observation_hat, observation_gt)
     # operations for LPIPS and FID
     observation_hat = torch.clamp(observation_hat, -1.0, 1.0)
@@ -168,11 +176,17 @@ def get_random_start_goal(env_id, batch_size):
 def plot_maze_layout(ax, maze_grid):
     ax.clear()
 
+    n_rows = None
+    n_cols = None
     if maze_grid is not None:
+        n_rows = len(maze_grid)
+        n_cols = len(maze_grid[0]) if n_rows > 0 else 0
         for i, row in enumerate(maze_grid):
             for j, cell in enumerate(row):
                 if cell == "#":
-                    square = plt.Rectangle((i + 0.5, j + 0.5), 1, 1, edgecolor="black", facecolor="black")
+                    square = plt.Rectangle(
+                        (i + 0.5, j + 0.5), 1, 1, edgecolor="black", facecolor="black"
+                    )
                     ax.add_patch(square)
 
     ax.set_aspect("equal")
@@ -193,16 +207,21 @@ def plot_maze_layout(ax, maze_grid):
         labelbottom=False,
         labelleft=False,
     )
-    ax.set_xticks(np.arange(0.5, len(maze_grid) + 0.5))
-    ax.set_yticks(np.arange(0.5, len(maze_grid[0]) + 0.5))
-    ax.set_xlim(0.5, len(maze_grid) + 0.5)
-    ax.set_ylim(0.5, len(maze_grid[0]) + 0.5)
+
+    # For non-grid envs we don't have maze dimensions; let matplotlib autoscale.
+    if n_rows is not None and n_cols is not None and n_rows > 0 and n_cols > 0:
+        ax.set_xticks(np.arange(0.5, n_rows + 0.5))
+        ax.set_yticks(np.arange(0.5, n_cols + 0.5))
+        ax.set_xlim(0.5, n_rows + 0.5)
+        ax.set_ylim(0.5, n_cols + 0.5)
     ax.grid(True, color="white", which="minor", linewidth=4)
 
 
 def plot_start_goal(ax, start_goal: None):
     def draw_star(center, radius, num_points=5, color="black"):
-        angles = np.linspace(0.0, 2 * np.pi, num_points, endpoint=False) + 5 * np.pi / (2 * num_points)
+        angles = np.linspace(0.0, 2 * np.pi, num_points, endpoint=False) + 5 * np.pi / (
+            2 * num_points
+        )
         inner_radius = radius / 2.0
 
         points = []
@@ -220,27 +239,95 @@ def plot_start_goal(ax, start_goal: None):
         ax.add_patch(star)
 
     start_x, start_y = start_goal[0]
-    start_outer_circle = plt.Circle((start_x, start_y), 0.16, facecolor="white", edgecolor="black")
+    start_outer_circle = plt.Circle(
+        (start_x, start_y), 0.16, facecolor="white", edgecolor="black"
+    )
     ax.add_patch(start_outer_circle)
     start_inner_circle = plt.Circle((start_x, start_y), 0.08, color="black")
     ax.add_patch(start_inner_circle)
 
     goal_x, goal_y = start_goal[1]
-    goal_outer_circle = plt.Circle((goal_x, goal_y), 0.16, facecolor="white", edgecolor="black")
+    goal_outer_circle = plt.Circle(
+        (goal_x, goal_y), 0.16, facecolor="white", edgecolor="black"
+    )
     ax.add_patch(goal_outer_circle)
     draw_star((goal_x, goal_y), radius=0.08)
 
 
-def make_trajectory_images(env_id, trajectory, batch_size, start, goal, plot_end_points=True):
+def make_grid_images(batch, sample_size=1, prediction=None):
+    maze, goal, observations, _, _, _ = batch
+    if maze.shape[0] < sample_size:
+        sample_size = maze.shape[0] 
+    grid_size = int(np.sqrt(maze.shape[1]))
+    maze = maze.reshape((maze.shape[0], grid_size, grid_size))[:sample_size].int()
+    # x * 2 + 1 transforms from maze to grid coordinates
+    observations = observations[:sample_size].int()  * 2 + 1
+    start = observations[:,0,:]
+    goal = goal[:sample_size].int()  * 2 + 1
+
+    # Fill in trajectory gaps
+    filler_observations = ((observations[:, :-1, :] + observations[:, 1:, :]) / 2).int()
+    traj_len = observations.shape[1] * 2 -1
+    trajectory = torch.empty(sample_size, traj_len, 2, dtype=torch.int)
+    trajectory[:, 0::2] = observations
+    trajectory[:, 1::2] = filler_observations
+
+    # Create grid image
+    print("maze", maze.shape)
+    print("trajectory", trajectory.shape, trajectory.dtype)
+    print("start", start.shape)
+    print("goal", goal.shape)
+
+    plot_array = maze.unsqueeze(-1).repeat(1, 1, 1, 3) * 255
+    # Add trajectory
+    
+    if prediction is not None:
+        prediction = (prediction * 2 + 1).permute(1,0,2).int()[:sample_size]
+        filler_predictions = ((prediction[:, :-1, :] + prediction[:, 1:, :]) / 2).int()
+        traj_len = prediction.shape[1] * 2 -1
+        print("traj_len", traj_len)
+        pred_trajectory = torch.empty(sample_size, traj_len, 2, dtype=torch.int)
+        pred_trajectory[:, 0::2] = prediction
+        pred_trajectory[:, 1::2] = filler_predictions
+        print("pred_trajectory", pred_trajectory.shape, pred_trajectory.dtype)
+        colors = torch.linspace(50, 230, steps=traj_len).int()
+        plot_array[...,1][torch.arange(sample_size)[:, None], pred_trajectory[..., 0], pred_trajectory[...,1]] = colors
+    else:
+        colors = torch.linspace(50, 230, steps=traj_len).int()
+        plot_array[...,1][torch.arange(sample_size)[:, None], trajectory[..., 0], trajectory[...,1]] = colors
+    # Add start 
+    plot_array[...,0][torch.arange(sample_size), start[:, 0], start[:,1]] = 0
+    # Add goal 
+    plot_array[...,2][torch.arange(sample_size), goal[:, 0], goal[:,1]] = 0
+
+    return plot_array.numpy().astype(np.uint8)
+
+
+def make_trajectory_images(
+    env_id,
+    trajectory,
+    batch_size,
+    start,
+    goal,
+    plot_end_points=True,
+    maze_grids=None,
+):
     images = []
     for batch_idx in range(batch_size):
         fig, ax = plt.subplots()
-        if is_grid_env(env_id):
+        if maze_grids is not None:
+            maze_grid = maze_grids[batch_idx]
+        elif is_grid_env(env_id):
             maze_grid = get_maze_grid(env_id)
         else:
             maze_grid = None
         plot_maze_layout(ax, maze_grid)
-        ax.scatter(trajectory[:, batch_idx, 0], trajectory[:, batch_idx, 1], c=np.arange(len(trajectory)), cmap="Reds"),
+        ax.scatter(
+            trajectory[:, batch_idx, 0],
+            trajectory[:, batch_idx, 1],
+            c=np.arange(len(trajectory)),
+            cmap="Reds",
+        ),
         if plot_end_points:
             start_goal = (start[batch_idx], goal[batch_idx])
             plot_start_goal(ax, start_goal)
@@ -248,7 +335,11 @@ def make_trajectory_images(env_id, trajectory, batch_size, start, goal, plot_end
         fig.tight_layout()
         fig.canvas.draw()
         img_shape = fig.canvas.get_width_height()[::-1] + (4,)
-        img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).copy().reshape(img_shape)
+        img = (
+            np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+            .copy()
+            .reshape(img_shape)
+        )
         images.append(img)
 
         plt.close()
@@ -278,7 +369,9 @@ def make_convergence_animation(
     start, goal = start[batch_idx], goal[batch_idx]
     trajectory = trajectory[:, batch_idx]
     plan_history = [[pm[:, batch_idx] for pm in pt] for pt in plan_history]
-    trajectory, plan_history = prune_history(plan_history, trajectory, goal, open_loop_horizon)
+    trajectory, plan_history = prune_history(
+        plan_history, trajectory, goal, open_loop_horizon
+    )
 
     # animate the convergence of the first plan
     fig, ax = plt.subplots()
@@ -366,7 +459,9 @@ def make_mpc_animation(
     start, goal = start[batch_idx], goal[batch_idx]
     trajectory = trajectory[:, batch_idx]
     plan_history = [[pm[:, batch_idx] for pm in pt] for pt in plan_history]
-    trajectory, plan_history = prune_history(plan_history, trajectory, goal, open_loop_horizon)
+    trajectory, plan_history = prune_history(
+        plan_history, trajectory, goal, open_loop_horizon
+    )
 
     # animate the convergence of the plans
     fig, ax = plt.subplots()
