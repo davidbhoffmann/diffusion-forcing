@@ -161,6 +161,9 @@ class BaseLightningExperiment(BaseExperiment):
         """
         All training happens here
         """
+        train_dataloader = self._build_training_loader()
+        validation_dataloader = self._build_validation_loader()
+
         if not self.algo:
             self.algo = self._build_algo()
         if self.cfg.training.compile:
@@ -202,8 +205,8 @@ class BaseLightningExperiment(BaseExperiment):
 
         trainer.fit(
             self.algo,
-            train_dataloaders=self._build_training_loader(),
-            val_dataloaders=self._build_validation_loader(),
+            train_dataloaders=train_dataloader,
+            val_dataloaders=validation_dataloader,
             ckpt_path=self.ckpt_path,
         )
 
@@ -211,6 +214,8 @@ class BaseLightningExperiment(BaseExperiment):
         """
         All validation happens here
         """
+        validation_dataloader = self._build_validation_loader()
+
         if not self.algo:
             self.algo = self._build_algo()
         if self.cfg.validation.compile:
@@ -236,7 +241,7 @@ class BaseLightningExperiment(BaseExperiment):
 
         trainer.validate(
             self.algo,
-            dataloaders=self._build_validation_loader(),
+            dataloaders=validation_dataloader,
             ckpt_path=self.ckpt_path,
         )
 
@@ -244,6 +249,8 @@ class BaseLightningExperiment(BaseExperiment):
         """
         All testing happens here
         """
+        test_dataloader = self._build_test_loader()
+
         if not self.algo:
             self.algo = self._build_algo()
         if self.cfg.test.compile:
@@ -267,7 +274,7 @@ class BaseLightningExperiment(BaseExperiment):
         # and further trained during train.
         trainer.test(
             self.algo,
-            dataloaders=self._build_test_loader(),
+            dataloaders=test_dataloader,
             ckpt_path=self.ckpt_path,
         )
 
