@@ -13,6 +13,12 @@ from tqdm import tqdm
 import urllib
 import os
 
+
+from typing import Optional
+import numpy as np
+import gymnasium as gym
+
+
 from datasets.offline_rl.utils import get_solutions_tree, get_action
 
 
@@ -96,9 +102,9 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
 
 
         grid_pid, goal_pid = self.dataset["positions"][idx][0].tolist()
-        positions = torch.from_numpy(self.dataset["positions"][idx][1:]).float()
+        positions = torch.from_numpy(self.dataset["positions"][idx][1:]).int() 
         grid_aid, goal_aid = self.dataset["actions"][idx][:2].tolist()
-        actions = torch.from_numpy(self.dataset["actions"][idx][2:]).float()
+        actions = torch.from_numpy(self.dataset["actions"][idx][2:]).int()
         grid_rid, goal_rid = self.dataset["rewards"][idx][:2].tolist()
         rewards = torch.from_numpy(self.dataset["rewards"][idx][2:]).float()
 
@@ -114,7 +120,7 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
 
         # rewards = torch.zeros_like(positions).float()
         # rewards[-1] = 1.0
-        nonterminals = torch.ones_like(positions).bool()
+        nonterminals = torch.ones_like(actions).bool()
         nonterminals[-1] = False
 
         # return observation, action, reward, nonterminal
@@ -251,8 +257,9 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         for split, split_mazes in splits.items():
             # obs, acts, rews, terminals, grid_ids, trajectory_ids = [], [], [], [], [], []
             grids, goals, actions, positions, rewards = [], [], [], [], []
-            grid_id, goal_id = 0, 0 
             for grid_id, maze in enumerate(split_mazes):
+                # For now only one goal per grid
+                goal_id = grid_id
                 pixels = maze.as_pixels(False, False)
                 wall_mask = pixels[..., 0] == 255
                 wall_mask = wall_mask.reshape(-1)
@@ -281,11 +288,11 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
 
             np.savez(
                 dataset_paths[split],
-                grids=np.array(grids, dtype=np.uint8),
-                goals=np.array(goals),
-                actions=np.array(actions),  
-                rewards=np.array(rewards),
-                positions=np.array(positions),
+                grids=np.array(grids, dtype=np.int8),
+                goals=np.array(goals, dtype=np.int8),
+                actions=np.array(actions, dtype=np.int8),  
+                rewards=np.array(rewards, dtype=np.float16),
+                positions=np.array(positions, dtype=np.int8),
             )
 
 
@@ -380,9 +387,9 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
     def set_dataset_stats(self):
         grids = self.dataset["grids"]
         goals = self.dataset["goals"]
-        actions = self.dataset["actions"]
-        positions = self.dataset["positions"]
-        rewards = self.dataset["rewards"]
+        actions = self.dataset["actions"][..., -self.n_frames:]
+        positions = self.dataset["positions"][..., -self.n_frames:,:]
+        rewards = self.dataset["rewards"][..., -self.n_frames:]
 
 
         max_stats_samples =  200000
@@ -396,16 +403,16 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
             rewards = rewards[idx]
 
 
-        observation_mean = positions.mean(axis=0)
-        observation_std = positions.std(axis=0)
+        observation_mean = positions.mean(axis=(0,1))
+        observation_std = positions.std(axis=(0,1))
         observation_std = np.where(np.abs(observation_std) < 1e-6, 1.0, observation_std)
 
-        action_mean = actions.mean(axis=0)
-        action_std = actions.std(axis=0)
+        action_mean = actions.mean(axis=(0,1))
+        action_std = actions.std(axis=(0,1))
         action_std = np.where(np.abs(action_std) < 1e-6, 1.0, action_std)
 
-        reward_mean = float(rewards.mean())
-        reward_std = float(rewards.std())
+        reward_mean = float(rewards.mean(axis=(0,1)))
+        reward_std = float(rewards.std(axis=(0,1)))
         if abs(reward_std) < 1e-6: reward_std = 1.0
 
         with open_dict(self.cfg):
@@ -460,3 +467,125 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
     #         self.cfg.reward_mean = reward_mean
     #         self.cfg.reward_std = reward_std
     #         self.cfg._runtime_stats_initialized = True
+
+
+
+class MultiMaze2dEnv(gym.Env):
+    # Code copied and adapted from: https://gymnasium.farama.org/introduction/create_custom_env/
+    def __init__(self, grid):
+        # The size of the square grid (5x5 by default)
+        self.grid_size = int(np.sqrt(len(grid)))
+        self.maze_size = int((self.grid_size-1)/2)
+        self.grid = grid.reshape(self.grid_size,self.grid_size)
+        
+
+        # Initialize positions - will be set randomly in reset()
+        # Using -1,-1 as "uninitialized" state
+        self._agent_location = np.array([-1, -1], dtype=np.int32)
+        self._target_location = np.array([-1, -1], dtype=np.int32)
+
+        # Define what the agent can observe
+        # Dict space gives us structured, human-readable observations
+        self.observation_space = gym.spaces.Dict(
+            {
+                "agent": gym.spaces.Box(0, self.maze_size - 1, shape=(2,), dtype=int),   # [x, y] coordinates
+                "target": gym.spaces.Box(0, self.maze_size - 1, shape=(2,), dtype=int),  # [x, y] coordinates
+            }
+        )
+
+        # Define what actions are available (4 directions)
+        self.action_space = gym.spaces.Discrete(5)
+
+        # Map action numbers to actual movements on the grid
+        # This makes the code more readable than using raw numbers
+        self._action_to_direction = {
+            0: np.array([0, 0]),   # Stay
+            1: np.array([-1, 0]),  # Move up (row - 1)
+            2: np.array([1, 0]),   # Move down (row + 1)
+            3: np.array([0, -1]),  # Move left (col - 1)
+            4: np.array([0, 1]),   # Move right (col + 1)
+        }
+    def _get_obs(self):
+        """Convert internal state to observation format.
+
+        Returns:
+            dict: Observation with agent and target positions
+        """
+        return {"agent": self._agent_location, "target": self._target_location}
+    
+    def _get_info(self):
+        """Compute auxiliary information for debugging.
+
+        Returns:
+            dict: Info with distance between agent and target
+        """
+        return {
+            "distance": np.linalg.norm(
+                self._agent_location - self._target_location, ord=1
+            )
+        }
+    
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
+        """Start a new episode.
+
+        Args:
+            seed: Random seed for reproducible episodes
+            options: Additional configuration (unused in this example)
+
+        Returns:
+            tuple: (observation, info) for the initial state
+        """
+        # IMPORTANT: Must call this first to seed the random number generator
+        super().reset(seed=seed)
+
+        # Randomly place the agent anywhere on the grid
+        self._agent_location = self.np_random.integers(0, self.maze_size, size=2, dtype=int)
+
+        # Randomly place target, ensuring it's different from agent position
+        self._target_location = self._agent_location
+        while np.array_equal(self._target_location, self._agent_location):
+            self._target_location = self.np_random.integers(
+                0, self.maze_size, size=2, dtype=int
+            )
+
+        observation = self._get_obs()
+        info = self._get_info()
+
+        return observation, info
+
+    def step(self, action):
+        """Execute one timestep within the environment.
+
+        Args:
+            action: The action to take (0-3 for directions)
+
+        Returns:
+            tuple: (observation, reward, terminated, truncated, info)
+        """
+        # Map the discrete action (0-3) to a movement direction
+        direction = self._action_to_direction[action]
+
+        # Update agent position, ensuring that it is a valid transition
+        # otherwise don't move
+        
+        # np.clip prevents the agent from walking off the edge
+        boundary_r, boundary_c = (2*self._agent_location+1) + direction
+        if self.grid[boundary_r, boundary_c]:
+            self._agent_location = self._agent_location + direction
+        
+        # Check if agent reached the target
+        terminated = np.array_equal(self._agent_location, self._target_location)
+
+        # We don't use truncation in this simple environment
+        # (could add a step limit here if desired)
+        truncated = False
+
+        # Simple reward structure: +1 for reaching target, 0 otherwise
+        # Alternative: could give small negative rewards for each step to encourage efficiency
+        reward = 1 if terminated else 0
+
+        observation = self._get_obs()
+        info = self._get_info()
+
+        return observation, reward, terminated, truncated, info
+

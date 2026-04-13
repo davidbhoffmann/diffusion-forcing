@@ -1,3 +1,3 @@
 from .video import DmlabVideoDataset
 from .video import MinecraftVideoDataset
-from .offline_rl import Maze2dOfflineRLDataset, MultiMaze2dOfflineRLDataset, utils
+from .offline_rl import Maze2dOfflineRLDataset, MultiMaze2dOfflineRLDataset, MultiMaze2dEnv, utils
