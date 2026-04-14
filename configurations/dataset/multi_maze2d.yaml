@@ -1,7 +1,7 @@
 defaults:
   - base_dataset
 
-env_id: "multi-maze2d-v1"
+env_id: "gymnasium_env/MultiMaze2dEnv-v0"
 save_dir: data/multi_maze2d
 gamma: 1.0
 episode_len: 4
