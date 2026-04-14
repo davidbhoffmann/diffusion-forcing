@@ -287,10 +287,10 @@ def make_grid_images(batch, sample_size=1, prediction=None):
         trajectory[:, 1::2] = filler_observations
 
     # Create grid image
-    print("maze", maze.shape)
-    print("trajectory", trajectory.shape, trajectory.dtype)
-    print("start", start.shape)
-    print("goal", goal.shape)
+    # print("maze", maze.shape)
+    # print("trajectory", trajectory.shape, trajectory.dtype)
+    # print("start", start.shape)
+    # print("goal", goal.shape)
 
     plot_array = maze.unsqueeze(-1).repeat(1, 1, 1, 3) * 255
     # Add trajectory

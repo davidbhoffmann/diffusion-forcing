@@ -237,14 +237,15 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         )
         # TODO currently it is possible that duplicates exist between the 
         # different data splits -> leakage. 
-        dataset = MazeDataset.from_config(cfg).filter_by.path_length(min_length=self.n_frames)
-        max_iter, i = 100, 0
-        while len(dataset.mazes) < self.n_mazes and i < max_iter:
-            batch = MazeDataset.from_config(cfg).filter_by.path_length(min_length=self.n_frames)
-            dataset.mazes.extend(batch.mazes)
-            i+=1
-        mazes = dataset.mazes[:self.n_mazes]
-        print(f"Generated {len(mazes)} mazes with solutions longer than {self.n_frames}.")
+        dataset = MazeDataset.from_config(cfg) #.filter_by.path_length(min_length=self.n_frames)
+        # max_iter, i = 100, 0
+        # while len(dataset.mazes) < self.n_mazes and i < max_iter:
+        #     batch = MazeDataset.from_config(cfg).filter_by.path_length(min_length=self.n_frames)
+        #     dataset.mazes.extend(batch.mazes)
+        #     i+=1
+        # mazes = dataset.mazes[:self.n_mazes]
+        mazes = dataset.mazes
+        print(f"Generated {len(mazes)} mazes with solutions up to length {self.n_frames}.")
         np.random.shuffle(mazes)
 
         n = self.n_mazes
@@ -284,11 +285,17 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
                         traj_actions.append(get_action(curr, nxt))
                         curr = nxt
                     # Each trajectory is specific to a maze and a goal 
-                    traj_rewards = [0]*len(traj_actions)
+                    traj_rewards = [0]*self.n_frames
                     traj_rewards[-1] = 1
                     rewards.append([grid_id, goal_id] + traj_rewards)
-                    actions.append([grid_id, goal_id] + traj_actions) 
-                    positions.append([(grid_id, goal_id)] + traj_position) 
+                    actions.append([
+                        grid_id, goal_id] 
+                        + traj_actions 
+                        + [0]*(self.n_frames - len(traj_actions)))
+                    positions.append([
+                        (grid_id, goal_id)] 
+                        + traj_position 
+                        + [traj_position[-1]]*(self.n_frames - len(traj_position))) 
                 
 
             np.savez(

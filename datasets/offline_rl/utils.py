@@ -47,7 +47,7 @@ def get_solutions_tree(maze, goal_pos: tuple, length:int) -> tuple[dict, list]:
                 # paths_tree[n] = {"next": (r, c), "goal_dist": goal_distance}
                 paths_tree[n] = (r, c)
                 q.append((n, goal_distance))
-                if goal_distance == length: start_nodes.append(n)
+                if goal_distance <= length: start_nodes.append(n)
 
     return paths_tree, start_nodes
 
