@@ -628,8 +628,8 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
                 episode_reward += reward
                 episode_reward_if_stay += np.where(~reached, reward, 1)
                 first_reach += ~reached
-
-                if done.any():
+                # if .any() it terminates imediatly (step 0)
+                if done.all():
                     terminate = True
                     break
 
