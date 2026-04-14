@@ -256,6 +256,13 @@ def plot_start_goal(ax, start_goal: None):
 
 def make_grid_images(batch, sample_size=1, prediction=None):
     maze, goal, observations, _, _, _ = batch
+    # print("maze", maze.shape)
+    # print("observations", observations.shape, observations.dtype)
+    # print("goal", goal.shape)
+    # print("prediction", prediction.shape)
+    maze = maze.detach().cpu()
+    goal = goal.detach().cpu()
+    observations = observations.detach().cpu()
     if maze.shape[0] < sample_size:
         sample_size = maze.shape[0] 
     grid_size = int(np.sqrt(maze.shape[1]))

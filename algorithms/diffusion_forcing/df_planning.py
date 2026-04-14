@@ -560,7 +560,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         next_pos[blocked] = pos[blocked]
         return next_pos
 
-    def interact(self, batch: int, conditions=None, namespace="validation"):
+    def interact(self, batch, conditions=None, namespace="validation"):
         try:
             import gym
             from stable_baselines3.common.vec_env import DummyVecEnv
@@ -573,12 +573,12 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         maze, goal, positions, actions, rewards, nonterminals = batch
         batch_size=maze.shape[0]
         use_diffused_action = True
-        if self.action_dim != 2:
-            # https://arxiv.org/abs/2205.09991
-            print("Detected reduced observation/action space, using Diffuser like controller.")
-        else:
-            print("Detected full observation/action space, using MPC controller w/ diffused actions.")
-            use_diffused_action = True
+        # if self.action_dim != 2:
+        #     # https://arxiv.org/abs/2205.09991
+        #     print("Detected reduced observation/action space, using Diffuser like controller.")
+        # else:
+        #     print("Detected full observation/action space, using MPC controller w/ diffused actions.")
+        #     use_diffused_action = False
 
         envs = DummyVecEnv([lambda: MultiMaze2dEnv(grid=maze[i]) for i in range(batch_size)])
         envs.seed(0)
@@ -606,15 +606,14 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
 
         trajectory = []  # actual trajectory
         all_plan_hist = []  # a list of plan histories, each history is a collection of m diffusion steps
-
         # run mpc with diffused actions
         while not terminate and steps < self.episode_len:
             plan_hist = self.plan(obs_normalized, goal_normalized, self.episode_len - steps, conditions)
             plan_hist = self._unnormalize_x(plan_hist)  # (m t b c)
             plan = plan_hist[-1]  # (t b c)
+            
 
             all_plan_hist.append(plan_hist.cpu())
-
             for t in range(self.open_loop_horizon):
                 if use_diffused_action:
                     _, action, _ = self.split_bundle(plan[t])
@@ -635,8 +634,9 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
                     break
 
                 obs, reward, done = [torch.from_numpy(item).float() for item in [obs, reward, done]]
-                bundle = self.make_bundle(obs, action, reward[..., None])
-                trajectory.append(bundle)
+                # bundle = self.make_bundle(obs, action, reward[..., None])
+                # trajectory.append(bundle)
+                trajectory.append(obs)
                 obs = obs.to(self.device)
                 obs_normalized = ((obs[:, : self.observation_dim] - obs_mean[None]) / obs_std[None]).detach()
 
@@ -653,7 +653,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         goal = goal[:, :2].cpu().numpy().tolist()
         # images = make_trajectory_images(self.env_id, trajectory, samples, start, goal, self.plot_end_points)
         images = make_grid_images(
-            batch, sample_size=8, prediction=trajectory
+            batch, sample_size=samples, prediction=trajectory
         )
 
         for i, img in enumerate(images):
