@@ -1,5 +1,6 @@
 from typing import Optional, Any
 from omegaconf import DictConfig
+from omegaconf.omegaconf import open_dict
 import numpy as np
 from random import random
 import torch
@@ -10,36 +11,63 @@ from PIL import Image
 
 from .df_base import DiffusionForcingBase
 from utils.logging_utils import (
-    make_trajectory_images,
-    get_random_start_goal,
+    make_grid_images
 )
 
 
 class DiffusionForcingPlanning(DiffusionForcingBase):
     def __init__(self, cfg: DictConfig):
+        self.cfg = cfg
         self.env_id = cfg.env_id
-        self.action_dim = len(cfg.action_mean)
+        self.action_dim = cfg.action_dim
         self.observation_dim = len(cfg.observation_mean)
         self.use_reward = cfg.use_reward
         self.unstacked_dim = self.observation_dim + self.action_dim + int(self.use_reward)
+
+        # self.grid_observation_mean = np.array(cfg.observation_mean).reshape(-1)
+        # self.grid_observation_std = np.array(cfg.observation_std).reshape(-1)
+        # self.grid_observation_std = np.where(
+        #     np.abs(self.grid_observation_std) < 1e-6, 1.0, self.grid_observation_std
+        # )
+        # self.grid_observation_dim = len(self.grid_observation_mean)
+        # self.side = int(np.sqrt(self.grid_observation_dim))
+        # assert self.side * self.side == self.grid_observation_dim, "Grid observation must be square"
+
+        # self.position_dim = 2
+        # pos_mean = (self.side - 1) / 2.0
+        # pos_std = max(self.side / 2.0, 1.0)
+        # self.observation_mean = np.array([pos_mean, pos_mean], dtype=np.float32)
+        # self.observation_std = np.array([pos_std, pos_std], dtype=np.float32)
+
+        # self.action_mean = np.array(cfg.action_mean).reshape(-1)
+        # self.action_std = np.array(cfg.action_std).reshape(-1)
+        # self.action_dim = int(self.action_mean.shape[0])
+        # self.use_reward = cfg.use_reward
+        # self.unstacked_dim = (
+        #     self.position_dim + self.action_dim + int(self.use_reward)
+        # )
         cfg.x_shape = (self.unstacked_dim,)
         self.episode_len = cfg.episode_len
         self.n_tokens = self.episode_len // cfg.frame_stack + 1
         self.gamma = cfg.gamma
         self.reward_mean = cfg.reward_mean
         self.reward_std = cfg.reward_std
-        self.observation_mean = np.array(cfg.observation_mean[: self.observation_dim])
-        self.observation_std = np.array(cfg.observation_std[: self.observation_dim])
-        self.action_mean = np.array(cfg.action_mean[: self.action_dim])
-        self.action_std = np.array(cfg.action_std[: self.action_dim])
+        self.observation_mean = np.array(cfg.observation_mean)
+        self.observation_std = np.array(cfg.observation_std)
+        self.action_mean = np.array(cfg.action_mean)
+        self.action_std = np.array(cfg.action_std)
+        self.external_cond_dim = cfg.grid_shape + cfg.goal_dim
+        with open_dict(cfg):
+            cfg.external_cond_dim = self.external_cond_dim
         self.open_loop_horizon = cfg.open_loop_horizon
         self.padding_mode = cfg.padding_mode
         super().__init__(cfg)
         self.plot_end_points = cfg.plot_start_goal and self.guidance_scale != 0
+        self.plot_env_id = "array_dataset"
 
     def _build_model(self):
-        mean = list(self.observation_mean) + list(self.action_mean)
-        std = list(self.observation_std) + list(self.action_std)
+        mean = list(self.observation_mean) + [float(self.action_mean)]
+        std = list(self.observation_std) + [float(self.action_std)]
         if self.use_reward:
             mean += [self.reward_mean]
             std += [self.reward_std]
@@ -48,11 +76,11 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         super()._build_model()
 
     def _preprocess_batch(self, batch):
-        observations, actions, rewards, nonterminals = batch
+        maze, goal, observations, actions, rewards, nonterminals = batch
         batch_size, n_frames = observations.shape[:2]
 
-        observations = observations[..., : self.observation_dim]
-        actions = actions[..., : self.action_dim]
+        # observations = observations[..., : self.observation_dim]
+        # actions = actions[..., : self.action_dim]
 
         if (n_frames - 1) % self.frame_stack != 0:
             raise ValueError("Number of frames - 1 must be divisible by frame stack size")
@@ -62,8 +90,9 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         masks = torch.cumprod(nonterminals, dim=0).contiguous()
 
         rewards = rewards[:, :-1, None]
-        actions = actions[:, :-1]
+        actions = actions[:, :-1, None]
         init_obs, observations = torch.split(observations, [1, n_frames - 1], dim=1)
+
         bundles = self._normalize_x(self.make_bundle(observations, actions, rewards))  # (b t c)
         init_bundle = self._normalize_x(self.make_bundle(init_obs[:, 0]))  # (b c)
         init_bundle[:, self.observation_dim :] = 0  # zero out actions and rewards after normalization
@@ -72,11 +101,78 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         bundles = rearrange(bundles, "b (t fs) ... -> t b fs ...", fs=self.frame_stack)
         bundles = bundles.flatten(2, 3).contiguous()
 
-        if self.cfg.external_cond_dim:
-            raise ValueError("external_cond_dim not needed in planning")
-        conditions = None
+        condition_frames = self.frame_stack + n_frames - 1
+        conditions = torch.cat([maze, goal], dim=-1)
+        # conditions = torch.cat([torch.zeros_like(conditions[:, :1]), conditions[:, 1:]], 1)
+        conditions = repeat(conditions, "b d -> b t d", t=condition_frames)
+        conditions = rearrange(
+            conditions, "b (t fs) d -> t b (fs d)", fs=self.frame_stack
+        ).contiguous()
 
         return bundles, conditions, masks
+    
+        # # observations, actions, rewards, nonterminals = batch
+        # maze, goal, positions, actions, rewards, nonterminals = batch
+        # start = positions[...,0,:]
+        # batch_size, n_frames = positions.shape[:2]
+        
+        # # observations = observations[..., : self.observation_dim]
+        # # actions = actions[..., : self.action_dim]
+
+        # if (n_frames - 1) % self.frame_stack != 0:
+        #     raise ValueError(
+        #         "Number of frames - 1 must be divisible by frame stack size"
+        #     )
+
+        # if nonterminals.shape[1] != n_frames:
+        #     raise ValueError(
+        #         "nonterminals must have the same temporal length as observations"
+        #     )
+
+        # # Expect true per-step nonterminals from dataset windows.
+        # nonterminals = nonterminals.bool()
+        # nonterminals = torch.cat(
+        #     [
+        #         torch.ones_like(nonterminals[:, : self.frame_stack]),
+        #         nonterminals[:, :-1],
+        #     ],
+        #     dim=1,
+        # )
+        # nonterminals = nonterminals.bool().permute(1, 0)
+        # masks = torch.cumprod(nonterminals, dim=0).contiguous()
+
+        # rewards = rewards[:, :-1, None]
+        # actions = actions[:, :-1]
+        # init_obs, observations = torch.split(positions, [1, n_frames - 1], dim=1)
+        # bundles = self._normalize_x(
+        #     self.make_bundle(observations, actions, rewards)
+        # )  # (b t c)
+        # init_bundle = self._normalize_x(self.make_bundle(init_obs[:, 0]))  # (b c)
+        # init_bundle[:, self.observation_dim :] = (
+        #     0  # zero out actions and rewards after normalization
+        # )
+        # init_bundle = self.pad_init(init_bundle, batch_first=True)  # (b t c)
+        # bundles = torch.cat([init_bundle, bundles], dim=1)
+        # bundles = rearrange(bundles, "b (t fs) ... -> t b fs ...", fs=self.frame_stack)
+        # bundles = bundles.flatten(2, 3).contiguous()
+
+        # # if self.cfg.external_cond_dim:
+        # #     raise ValueError("external_cond_dim not needed in planning")
+        # # TODO check how the conditioning works
+        # # conditions = None
+        # # condition_frames = self.frame_stack + n_frames - 1
+        # # conditions = repeat(static_condition, "b d -> b t d", t=condition_frames)
+        # # conditions = rearrange(
+        # #     conditions, "b (t fs) d -> t b (fs d)", fs=self.frame_stack
+        # # ).contiguous()
+        
+        # print("DEBUG: maze, goal", maze.shape, goal.shape)
+        # conditions = torch.cat([maze, goal], dim=-1)
+        # conditions = torch.cat([torch.zeros_like(conditions[:, :1]), conditions[:, 1:]], 1)
+        # conditions = rearrange(conditions, "b (t fs) d -> t b (fs d)", fs=self.frame_stack).contiguous()
+        
+
+        # return bundles, conditions, masks
 
     def training_step(self, batch, batch_idx):
         xs, conditions, masks = self._preprocess_batch(batch)
@@ -86,19 +182,29 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         weights = masks.float()
         if not self.causal:
             # manually mask out entries to train for varying length
-            random_terminal = torch.randint(2, n_tokens + 1, (batch_size,), device=self.device)
-            random_terminal = nn.functional.one_hot(random_terminal, n_tokens + 1)[:, :n_tokens].bool()
-            random_terminal = repeat(random_terminal, "b t -> (t fs) b", fs=self.frame_stack)
+            random_terminal = torch.randint(
+                2, n_tokens + 1, (batch_size,), device=self.device
+            )
+            random_terminal = nn.functional.one_hot(random_terminal, n_tokens + 1)[
+                :, :n_tokens
+            ].bool()
+            random_terminal = repeat(
+                random_terminal, "b t -> (t fs) b", fs=self.frame_stack
+            )
             nonterminal_causal = torch.cumprod(~random_terminal, dim=0)
             weights *= torch.clip(nonterminal_causal.float(), min=0.05)
             masks *= nonterminal_causal.bool()
 
-        xs_pred, loss = self.diffusion_model(xs, conditions, noise_levels=self._generate_noise_levels(xs, masks=masks))
+        xs_pred, loss = self.diffusion_model(
+            xs, conditions, noise_levels=self._generate_noise_levels(xs, masks=masks)
+        )
 
         loss = self.reweight_loss(loss, weights)
 
         if batch_idx % 100 == 0:
-            self.log("training/loss", loss, on_step=True, on_epoch=False, sync_dist=True)
+            self.log(
+                "training/loss", loss, on_step=True, on_epoch=False, sync_dist=True
+            )
 
         xs = self._unstack_and_unnormalize(xs)[self.frame_stack - 1 :]
         xs_pred = self._unstack_and_unnormalize(xs_pred)[self.frame_stack - 1 :]
@@ -106,14 +212,16 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         # Visualization, including masked out entries
         if self.global_step % 10000 == 0:
             o, a, r = self.split_bundle(xs_pred)
-            trajectory = o.detach().cpu().numpy()[:-1, :8]  # last observation is dummy, sample 8
-            images = make_trajectory_images(self.env_id, trajectory, trajectory.shape[1], None, None, False)
+            trajectory = o.detach().cpu()
+            images = make_grid_images(batch, 4, trajectory)
+            # images = make_trajectory_images(
+            #     self.plot_env_id, trajectory, trajectory.shape[1], None, None, False
+            # )
             for i, img in enumerate(images):
                 self.log_image(
-                    f"training_visualization/sample_{i}",
+                    f"training_visualization/step{self.global_step}_sample{i}",
                     Image.fromarray(img),
                 )
-
         output_dict = {
             "loss": loss,
             "xs_pred": xs_pred,
@@ -129,13 +237,18 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         if self.guidance_scale == 0:
             namespace += "_no_guidance_random_walk"
         horizon = self.episode_len
-        if self.action_dim != 2:
-            self.eval_planning(
-                batch_size, conditions, horizon, namespace + str(horizon)
-            )  # can run planning without environment installation
-        self.interact(batch_size, conditions, namespace)  # interact if environment is installation
+        self.eval_planning(
+            batch, conditions, horizon, namespace + str(horizon)
+        )  # can run planning without environment installation
+        self.interact(batch, conditions, namespace)
 
-    def plan(self, start: torch.Tensor, goal: torch.Tensor, horizon: int, conditions: Optional[Any] = None):
+    def plan(
+        self,
+        start: torch.Tensor,
+        goal: torch.Tensor,
+        horizon: int,
+        conditions: Optional[Any] = None,
+    ):
         # start and goal are numpy arrays of shape (b, obs_dim)
         # start and goal are assumed to be normalized
         # returns plan history of (m, t, b, c), where the last dim of m is the fully diffused plan
@@ -148,28 +261,40 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         def goal_guidance(x):
             # x is a tensor of shape [t b (fs c)]
             pred = rearrange(x, "t b (fs c) -> (t fs) b c", fs=self.frame_stack)
-            h_padded = pred.shape[0] - self.frame_stack  # include padding when horizon % frame_stack != 0
+            h_padded = (
+                pred.shape[0] - self.frame_stack
+            )  # include padding when horizon % frame_stack != 0
 
             if not self.use_reward:
                 # sparse / no reward setting, guide with goal like diffuser
                 target = torch.stack([start] * self.frame_stack + [goal] * (h_padded))
-                dist = nn.functional.mse_loss(pred, target, reduction="none")  # (t fs) b c
+                dist = nn.functional.mse_loss(
+                    pred, target, reduction="none"
+                )  # (t fs) b c
 
                 # guidance weight for observation and action
                 weight = np.array(
-                    [20] * (self.frame_stack)  # conditoning (aka reconstruction guidance)
-                    + [1 for _ in range(horizon)]  # try to reach the goal at any horizon
-                    + [0] * (h_padded - horizon)  # don't guide padded entries due to horizon % frame_stack != 0
+                    [20]
+                    * (self.frame_stack)  # conditoning (aka reconstruction guidance)
+                    + [
+                        1 for _ in range(horizon)
+                    ]  # try to reach the goal at any horizon
+                    + [0]
+                    * (
+                        h_padded - horizon
+                    )  # don't guide padded entries due to horizon % frame_stack != 0
                 )
                 # mathematically, one may also try multiplying weight by sqrt(alpha_cum)
                 # this means you put higher weight to less noisy terms
                 # which might be better but we haven't tried yet
                 weight = torch.from_numpy(weight).float().to(self.device)
-                
-                dist_o, dist_a, _ = self.split_bundle(dist)  # guidance observation and action with separate weights
+
+                dist_o, dist_a, _ = self.split_bundle(
+                    dist
+                )  # guidance observation and action with separate weights
                 dist_a = torch.sum(dist_a, -1, keepdim=True).sqrt()
-                dist_o = reduce(dist_o, "t b (n c) -> t b n", "sum", n=self.observation_dim // 2).sqrt()
-                dist_o = torch.tanh(dist_o / 2)  # similar to the "squashed gaussian" in RL, squash to (-1, 1)
+                dist_o = torch.sum(dist_o, -1, keepdim=True).sqrt()
+                dist_o = torch.tanh(dist_o / 2)  # like squashed gaussian in RL, squash to (-1, 1)
                 dist = torch.cat([dist_o, dist_a], -1)
                 weight = repeat(weight, "t -> t c", c=dist.shape[-1])
                 weight[self.frame_stack :, 1:] = 8
@@ -179,9 +304,15 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
                 episode_return = -(dist * weight).mean() * 1000
             else:
                 # dense reward seeting, guide with reward
-                raise NotImplementedError("reward guidance not officially supported yet, although implemented")
+                raise NotImplementedError(
+                    "reward guidance not officially supported yet, although implemented"
+                )
                 rewards = pred[:, :, -1]
-                weight = np.array([10] * self.frame_stack + [0.997**j for j in range(h)] + [0] * h_padded)
+                weight = np.array(
+                    [10] * self.frame_stack
+                    + [0.997**j for j in range(h)]
+                    + [0] * h_padded
+                )
                 weight = torch.from_numpy(weight).float().to(self.device)
                 episode_return = rewards * weight[:, None]
 
@@ -192,11 +323,37 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         plan_tokens = np.ceil(horizon / self.frame_stack).astype(int)
         pad_tokens = 0 if self.causal else self.n_tokens - plan_tokens - 1
         scheduling_matrix = self._generate_scheduling_matrix(plan_tokens)
-        chunk = torch.randn((plan_tokens, batch_size, *self.x_stacked_shape), device=self.device)
-        chunk = torch.clamp(chunk, -self.cfg.diffusion.clip_noise, self.cfg.diffusion.clip_noise)
-        pad = torch.zeros((pad_tokens, batch_size, *self.x_stacked_shape), device=self.device)
+        chunk = torch.randn(
+            (plan_tokens, batch_size, *self.x_stacked_shape), device=self.device
+        )
+        chunk = torch.clamp(
+            chunk, -self.cfg.diffusion.clip_noise, self.cfg.diffusion.clip_noise
+        )
+        pad = torch.zeros(
+            (pad_tokens, batch_size, *self.x_stacked_shape), device=self.device
+        )
         init_token = rearrange(self.pad_init(start), "fs b c -> 1 b (fs c)")
         plan = torch.cat([init_token, chunk, pad], 0)
+
+        # total_tokens = plan.shape[0]
+        # if conditions is None:
+        #     static_conditions = torch.zeros(
+        #         (batch_size, self.external_cond_dim),
+        #         device=self.device,
+        #         dtype=plan.dtype,
+        #     )
+        # elif isinstance(conditions, torch.Tensor) and conditions.dim() == 2:
+        #     static_conditions = conditions.to(device=self.device, dtype=plan.dtype)
+        # elif isinstance(conditions, torch.Tensor) and conditions.dim() == 3:
+        #     if conditions.shape[1] != batch_size:
+        #         raise ValueError("Condition batch size mismatch in plan")
+        #     static_conditions = conditions[0].reshape(batch_size, self.frame_stack, -1)[:, 0]
+        #     static_conditions = static_conditions.to(device=self.device, dtype=plan.dtype)
+        # else:
+        #     raise ValueError("conditions must be None, [b, d], or [t, b, fs*d]")
+        # conditions = repeat(
+        #     static_conditions, "b d -> t b (fs d)", t=total_tokens, fs=self.frame_stack
+        # )
 
         plan_hist = [plan.detach()[: self.n_tokens - pad_tokens]]
         stabilization = 0
@@ -220,28 +377,30 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
             from_noise_levels = repeat(from_noise_levels, "t -> t b", b=batch_size)
             to_noise_levels = repeat(to_noise_levels, "t -> t b", b=batch_size)
             plan[1 : self.n_tokens - pad_tokens] = self.diffusion_model.sample_step(
-                plan, conditions, from_noise_levels, to_noise_levels, guidance_fn=guidance_fn
+                plan,
+                conditions,
+                from_noise_levels,
+                to_noise_levels,
+                guidance_fn=guidance_fn,
             )[1 : self.n_tokens - pad_tokens]
             plan_hist.append(plan.detach()[: self.n_tokens - pad_tokens])
 
         plan_hist = torch.stack(plan_hist)
-        plan_hist = rearrange(plan_hist, "m t b (fs c) -> m (t fs) b c", fs=self.frame_stack)
+        plan_hist = rearrange(
+            plan_hist, "m t b (fs c) -> m (t fs) b c", fs=self.frame_stack
+        )
         plan_hist = plan_hist[:, self.frame_stack : self.frame_stack + horizon]
 
         return plan_hist
 
-    def eval_planning(self, batch_size: int, conditions=None, horizon=None, namespace="validation"):
-        start, goal = get_random_start_goal(self.env_id, batch_size)
+    def eval_planning(
+        self, batch, conditions, horizon=None, namespace="validation"
+    ):
+        maze_grids, goal, observations, _, _, _ = batch
+        start = observations[:,0,:]
 
-        start_normalized = torch.from_numpy(start).float().to(self.device)
-        start_normalized = torch.cat([start_normalized, torch.zeros_like(start_normalized)], -1)
-        start_normalized = start_normalized[:, : self.observation_dim]
-        start_normalized = self.split_bundle(self._normalize_x(self.make_bundle(start_normalized)))[0]
-
-        goal_normalized = torch.from_numpy(goal).float().to(self.device)
-        goal_normalized = torch.cat([goal_normalized, torch.zeros_like(goal_normalized)], -1)
-        goal_normalized = goal_normalized[:, : self.observation_dim]
-        goal_normalized = self.split_bundle(self._normalize_x(self.make_bundle(goal_normalized)))[0]
+        start_normalized = self.split_bundle(self._normalize_x(self.make_bundle(start)))[0]
+        goal_normalized = self.split_bundle(self._normalize_x(self.make_bundle(goal)))[0]
 
         horizon = self.episode_len if horizon is None else horizon
         plan_hist = self.plan(start_normalized, goal_normalized, horizon, conditions)
@@ -250,26 +409,170 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
 
         # Visualization
         o, _, _ = self.split_bundle(plan)
-        o = o.detach().cpu().numpy()[:-1, :16]  # last observation is dummy
-        images = make_trajectory_images(self.env_id, o, o.shape[1], start, goal, self.plot_end_points)
+        o_xy = o.detach().cpu()
+
+        # grid_dim = int(np.sqrt(self.cfg.grid_shape))
+        # wall = conditions[...,:self.cfg.grid_shape].reshape(conditions.shape[:-1]+(grid_dim, grid_dim))
+        # # wall, _, _ = self._decode_grid(start_obs)
+        # maze_grids = self._walls_to_maze_grids(wall[: o_xy.shape[1]])
+        images = make_grid_images(
+            batch, sample_size=8, prediction=o_xy
+        )
+        # images = make_trajectory_images(
+        #     self.plot_env_id,
+        #     o_xy,
+        #     o_xy.shape[1],
+        #     start_xy[:16].tolist(),
+        #     goal_xy[:16].tolist(),
+        #     self.plot_end_points,
+        #     maze_grids=maze_grids,
+        # )
         for i, img in enumerate(images):
             self.log_image(
                 f"{namespace}_plan/sample_{i}",
                 Image.fromarray(img),
             )
 
-    def interact(self, batch_size: int, conditions=None, namespace="validation"):
+    # def _extract_start_goal_from_batch(self, batch):
+    #     observations = batch[0][..., : self.observation_dim].float().to(self.device)
+    #     start_obs = observations[:, 0]
+
+    #     # For grid datasets, sequence windows can cross trajectory boundaries in the
+    #     # flattened replay buffer. Always derive goal from the same maze state as start.
+    #     wall, pos, goal = self._decode_grid(start_obs)
+    #     pos, goal = self._project_positions_to_free_cells(wall, pos, goal)
+    #     start_obs = self._encode_grid(wall, pos, goal)
+    #     goal_obs = self._encode_grid(wall, goal, goal)
+
+    #     start_xy = self._observations_to_xy(start_obs).detach().cpu().numpy()
+    #     goal_xy = self._goals_to_xy(goal_obs).detach().cpu().numpy()
+    #     return start_obs, goal_obs, start_xy, goal_xy
+
+    # def _nearest_free_cell(self, wall, target):
+    #     side_x, side_y = wall.shape
+    #     tx, ty = int(target[0].item()), int(target[1].item())
+    #     tx = int(np.clip(tx, 0, side_x - 1))
+    #     ty = int(np.clip(ty, 0, side_y - 1))
+
+    #     if not bool(wall[tx, ty].item()):
+    #         return torch.tensor([tx, ty], device=wall.device, dtype=torch.long)
+
+    #     max_radius = side_x + side_y
+    #     for radius in range(1, max_radius + 1):
+    #         x0 = max(0, tx - radius)
+    #         x1 = min(side_x - 1, tx + radius)
+    #         y0 = max(0, ty - radius)
+    #         y1 = min(side_y - 1, ty + radius)
+    #         for x in range(x0, x1 + 1):
+    #             for y in range(y0, y1 + 1):
+    #                 if abs(x - tx) + abs(y - ty) != radius:
+    #                     continue
+    #                 if not bool(wall[x, y].item()):
+    #                     return torch.tensor(
+    #                         [x, y], device=wall.device, dtype=torch.long
+    #                     )
+
+    #     return torch.tensor([tx, ty], device=wall.device, dtype=torch.long)
+
+    # def _project_positions_to_free_cells(self, wall, pos, goal):
+    #     pos_fixed = pos.clone().long()
+    #     goal_fixed = goal.clone().long()
+    #     for b in range(wall.shape[0]):
+    #         pos_fixed[b] = self._nearest_free_cell(wall[b], pos_fixed[b])
+    #         goal_fixed[b] = self._nearest_free_cell(wall[b], goal_fixed[b])
+    #     return pos_fixed, goal_fixed
+
+    # def _observations_to_xy(self, obs):
+    #     if obs.shape[-1] == self.observation_dim:
+    #         return obs.float()
+    #     side = self.side
+    #     grid = obs.reshape(*obs.shape[:-1], side, side).reshape(*obs.shape[:-1], -1)
+    #     score_agent = -torch.minimum((grid - 2.0) ** 2, (grid - 4.0) ** 2)
+    #     flat = score_agent
+
+    #     idx = flat.argmax(-1)
+    #     x = (idx // side).float()
+    #     y = (idx % side).float()
+    #     return torch.stack([x, y], -1)
+
+    # def _goals_to_xy(self, obs):
+    #     if obs.shape[-1] == self.observation_dim:
+    #         return obs.float()
+    #     side = self.side
+    #     grid = obs.reshape(*obs.shape[:-1], side, side).reshape(*obs.shape[:-1], -1)
+    #     score_goal = -torch.minimum((grid - 3.0) ** 2, (grid - 4.0) ** 2)
+    #     flat = score_goal
+
+    #     idx = flat.argmax(-1)
+    #     x = (idx // side).float()
+    #     y = (idx % side).float()
+    #     return torch.stack([x, y], -1)
+
+    # def _decode_grid(self, obs):     
+    #     if obs.shape[-1] != self.grid_observation_dim:
+    #         raise ValueError("Grid decoding expects flattened full-grid observations")
+    #     grid = obs.reshape(obs.shape[0], self.side, self.side)
+    #     wall = (grid > 0.5) & (grid < 1.5)
+
+    #     pos = self._observations_to_xy(obs).long()
+    #     goal = self._goals_to_xy(obs).long()
+    #     return wall, pos, goal
+
+    # def _encode_grid(self, wall, pos, goal):
+    #     batch_size, side, _ = wall.shape
+    #     b = torch.arange(batch_size, device=wall.device)
+
+    #     obs = torch.zeros((batch_size, side, side), device=wall.device)
+    #     obs[wall] = 1.0
+    #     obs[b, goal[:, 0], goal[:, 1]] = 3.0
+    #     same = (pos[:, 0] == goal[:, 0]) & (pos[:, 1] == goal[:, 1])
+    #     obs[b, pos[:, 0], pos[:, 1]] = 2.0
+    #     obs[b[same], pos[same, 0], pos[same, 1]] = 4.0
+    #     return obs.flatten(1)
+
+    def _walls_to_maze_grids(self, wall):
+        wall_np = wall.detach().cpu().numpy()
+        maze_grids = []
+        for sample in wall_np:
+            maze_grids.append(
+                [
+                    "".join(
+                        "#" if sample[i, j] else "O" for j in range(sample.shape[1])
+                    )
+                    for i in range(sample.shape[0])
+                ]
+            )
+        return maze_grids
+
+    def _step_grid_positions(self, pos, action, wall):
+        next_pos = pos.clone()
+        next_pos[action == 0, 0] -= 1
+        next_pos[action == 1, 0] += 1
+        next_pos[action == 2, 1] -= 1
+        next_pos[action == 3, 1] += 1
+        next_pos[:, 0] = next_pos[:, 0].clamp(0, wall.shape[1] - 1)
+        next_pos[:, 1] = next_pos[:, 1].clamp(0, wall.shape[2] - 1)
+        blocked = wall[
+            torch.arange(wall.shape[0], device=wall.device),
+            next_pos[:, 0],
+            next_pos[:, 1],
+        ]
+        next_pos[blocked] = pos[blocked]
+        return next_pos
+
+    def interact(self, batch: int, conditions=None, namespace="validation"):
         try:
-            import d4rl
             import gym
             from stable_baselines3.common.vec_env import DummyVecEnv
+            from datasets import MultiMaze2dEnv
         except ImportError:
-            print("d4rl import not successful, skipping environment interaction. Check d4rl installation.")
+            print("Gym import not successful, skipping environment interaction.")
             return
 
         print("Interacting with environment... This may take a couple minutes.")
-
-        use_diffused_action = False
+        maze, goal, positions, actions, rewards, nonterminals = batch
+        batch_size=maze.shape[0]
+        use_diffused_action = True
         if self.action_dim != 2:
             # https://arxiv.org/abs/2205.09991
             print("Detected reduced observation/action space, using Diffuser like controller.")
@@ -277,22 +580,22 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
             print("Detected full observation/action space, using MPC controller w/ diffused actions.")
             use_diffused_action = True
 
-        envs = DummyVecEnv([lambda: gym.make(self.env_id)] * batch_size)
+        envs = DummyVecEnv([lambda: MultiMaze2dEnv(grid=maze[i]) for i in range(batch_size)])
         envs.seed(0)
 
         terminate = False
         obs_mean = self.data_mean[: self.observation_dim]
         obs_std = self.data_std[: self.observation_dim]
-        obs = envs.reset()
+        obs = envs.reset()["agent"]
 
         obs = torch.from_numpy(obs).float().to(self.device)
         start = obs.detach()
         obs_normalized = ((obs[:, : self.observation_dim] - obs_mean[None]) / obs_std[None]).detach()
 
-        goal = np.concatenate(envs.get_attr("goal_locations"))
+        goal = np.stack(envs.get_attr("_target_location"))
         goal = torch.Tensor(goal).float().to(self.device)
-        goal = torch.cat([goal, torch.zeros_like(goal)], -1)
-        goal = goal[:, : self.observation_dim]
+        # goal = torch.cat([goal, torch.zeros_like(goal)], -1)
+        # goal = goal[:, : self.observation_dim]
         goal_normalized = ((goal - obs_mean[None]) / obs_std[None]).detach()
 
         steps = 0
@@ -320,6 +623,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
                     action = 12.5 * (plan[t, :, :2] - obs[:, :2]) + 1.2 * (plan_vel - obs[:, 2:])
                 action = torch.clip(action, -1, 1).detach().cpu()
                 obs, reward, done, _ = envs.step(np.nan_to_num(action.numpy()))
+                obs = obs["agent"]
 
                 reached = np.logical_or(reached, reward >= 1.0)
                 episode_reward += reward
@@ -347,13 +651,17 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         trajectory = torch.stack(trajectory)
         start = start[:, :2].cpu().numpy().tolist()
         goal = goal[:, :2].cpu().numpy().tolist()
-        images = make_trajectory_images(self.env_id, trajectory, samples, start, goal, self.plot_end_points)
+        # images = make_trajectory_images(self.env_id, trajectory, samples, start, goal, self.plot_end_points)
+        images = make_grid_images(
+            batch, sample_size=8, prediction=trajectory
+        )
 
         for i, img in enumerate(images):
             self.log_image(
                 f"{namespace}_interaction/sample_{i}",
                 Image.fromarray(img),
             )
+        
 
     def pad_init(self, x, batch_first=False):
         x = repeat(x, "b ... -> fs b ...", fs=self.frame_stack).clone()
@@ -403,12 +711,17 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
 
         return torch.cat(bundle, -1)
 
-    def _generate_noise_levels(self, xs: torch.Tensor, masks: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _generate_noise_levels(
+        self, xs: torch.Tensor, masks: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         noise_levels = super()._generate_noise_levels(xs, masks)
         _, batch_size, *_ = xs.shape
 
         # first frame is almost always known, this reflect that
         if random() < 0.5:
-            noise_levels[0] = torch.randint(0, self.timesteps // 4, (batch_size,), device=xs.device)
+            noise_levels[0] = torch.randint(
+                0, self.timesteps // 4, (batch_size,), device=xs.device
+            )
 
         return noise_levels
+

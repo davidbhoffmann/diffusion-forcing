@@ -38,6 +38,11 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         self.dataset = self.get_dataset()
         self.n_trajectories = int(self.dataset["actions"].shape[0])
         self.set_dataset_stats()
+        gym.register(
+            id="gymnasium_env/MultiMaze2dEnv-v0",
+            entry_point=MultiMaze2dEnv,
+            max_episode_steps=cfg.episode_len, 
+        )
 
         # REMOVE Backward-compat: older generated files stored scalar actions as shape (N,)
         # if self.dataset["actions"].ndim == 1:
@@ -553,7 +558,7 @@ class MultiMaze2dEnv(gym.Env):
 
         return observation, info
 
-    def step(self, action):
+    def step(self, action: int):
         """Execute one timestep within the environment.
 
         Args:
@@ -563,7 +568,7 @@ class MultiMaze2dEnv(gym.Env):
             tuple: (observation, reward, terminated, truncated, info)
         """
         # Map the discrete action (0-3) to a movement direction
-        direction = self._action_to_direction[action]
+        direction = self._action_to_direction[int(action)]
 
         # Update agent position, ensuring that it is a valid transition
         # otherwise don't move
@@ -588,4 +593,3 @@ class MultiMaze2dEnv(gym.Env):
         info = self._get_info()
 
         return observation, reward, terminated, truncated, info
-

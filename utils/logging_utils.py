@@ -265,12 +265,19 @@ def make_grid_images(batch, sample_size=1, prediction=None):
     start = observations[:,0,:]
     goal = goal[:sample_size].int()  * 2 + 1
 
+    if prediction is not None:
+        # Use predicted trajectory if available
+        observations = prediction.permute(1,0,2)[:sample_size].int() * 2 + 1
+
     # Fill in trajectory gaps
-    filler_observations = ((observations[:, :-1, :] + observations[:, 1:, :]) / 2).int()
-    traj_len = observations.shape[1] * 2 -1
-    trajectory = torch.empty(sample_size, traj_len, 2, dtype=torch.int)
-    trajectory[:, 0::2] = observations
-    trajectory[:, 1::2] = filler_observations
+    traj_len = observations.shape[1] * 2 - 1
+    if traj_len==1:
+        trajectory = observations
+    else:
+        filler_observations = ((observations[:, :-1, :] + observations[:, 1:, :]) / 2).int()
+        trajectory = torch.empty(sample_size, traj_len, 2, dtype=torch.int)
+        trajectory[:, 0::2] = observations
+        trajectory[:, 1::2] = filler_observations
 
     # Create grid image
     print("maze", maze.shape)
@@ -280,21 +287,20 @@ def make_grid_images(batch, sample_size=1, prediction=None):
 
     plot_array = maze.unsqueeze(-1).repeat(1, 1, 1, 3) * 255
     # Add trajectory
-    
-    if prediction is not None:
-        prediction = (prediction * 2 + 1).permute(1,0,2).int()[:sample_size]
-        filler_predictions = ((prediction[:, :-1, :] + prediction[:, 1:, :]) / 2).int()
-        traj_len = prediction.shape[1] * 2 -1
-        print("traj_len", traj_len)
-        pred_trajectory = torch.empty(sample_size, traj_len, 2, dtype=torch.int)
-        pred_trajectory[:, 0::2] = prediction
-        pred_trajectory[:, 1::2] = filler_predictions
-        print("pred_trajectory", pred_trajectory.shape, pred_trajectory.dtype)
-        colors = torch.linspace(50, 230, steps=traj_len).int()
-        plot_array[...,1][torch.arange(sample_size)[:, None], pred_trajectory[..., 0], pred_trajectory[...,1]] = colors
-    else:
-        colors = torch.linspace(50, 230, steps=traj_len).int()
-        plot_array[...,1][torch.arange(sample_size)[:, None], trajectory[..., 0], trajectory[...,1]] = colors
+    # if prediction is not None:
+    #     prediction = (prediction * 2 + 1).permute(1,0,2).int()[:sample_size]
+    #     filler_predictions = ((prediction[:, :-1, :] + prediction[:, 1:, :]) / 2).int()
+    #     traj_len = prediction.shape[1] * 2 -1
+    #     print("traj_len", traj_len, prediction.shape[1])
+    #     pred_trajectory = torch.empty(sample_size, traj_len, 2, dtype=torch.int)
+    #     pred_trajectory[:, 0::2] = prediction
+    #     pred_trajectory[:, 1::2] = filler_predictions
+    #     print("pred_trajectory", pred_trajectory.shape, pred_trajectory.dtype)
+    #     colors = torch.linspace(50, 230, steps=traj_len).int()
+    #     plot_array[...,1][torch.arange(sample_size)[:, None], pred_trajectory[..., 0], pred_trajectory[...,1]] = colors
+    # else:
+    colors = torch.linspace(50, 230, steps=traj_len).int()
+    plot_array[...,1][torch.arange(sample_size)[:, None], trajectory[..., 0], trajectory[...,1]] = colors
     # Add start 
     plot_array[...,0][torch.arange(sample_size), start[:, 0], start[:,1]] = 0
     # Add goal 
