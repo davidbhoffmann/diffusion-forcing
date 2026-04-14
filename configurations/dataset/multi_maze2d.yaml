@@ -5,7 +5,7 @@ env_id: "gymnasium_env/MultiMaze2dEnv-v0"
 save_dir: data/multi_maze2d
 gamma: 1.0
 episode_len: 4
-n_mazes: 100000
+n_mazes: 50
 maze_size: 3
 observation_shape: 2 
 action_dim: 1

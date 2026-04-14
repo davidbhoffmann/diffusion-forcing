@@ -21,7 +21,7 @@ env_id: ${dataset.env_id}
 x_shape: null
 frame_stack: 1 # How many frames are stacked together as a single token
 context_frames: 1
-open_loop_horizon: 50 #fixme
+open_loop_horizon: 1 #fixme
 use_reward: False
 causal: False
 plot_start_goal: True
