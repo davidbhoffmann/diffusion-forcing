@@ -28,12 +28,12 @@ class MultiMaze2dOfflineRLDataset(torch.utils.data.Dataset):
         super().__init__()
         self.cfg = cfg
         self.split = split
-        self.save_dir = cfg.save_dir
         self.n_mazes = cfg.n_mazes
         self.maze_size = cfg.maze_size
         self.gird_size = self.maze_size * 2 + 1
         self.gamma = cfg.gamma
         self.n_frames = cfg.episode_len + 1
+        self.save_dir = cfg.save_dir + f"_{self.n_frames}_{self.n_mazes}"
         Path(self.save_dir).mkdir(parents=True, exist_ok=True)
         self.dataset = self.get_dataset()
         self.n_trajectories = int(self.dataset["actions"].shape[0])

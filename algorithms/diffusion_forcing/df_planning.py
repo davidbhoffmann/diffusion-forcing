@@ -63,7 +63,8 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         self.padding_mode = cfg.padding_mode
         super().__init__(cfg)
         self.plot_end_points = cfg.plot_start_goal and self.guidance_scale != 0
-        self.plot_env_id = "array_dataset"
+        # self.plot_env_id = "array_dataset"
+        self.plot_samples = 6
 
     def _build_model(self):
         mean = list(self.observation_mean) + [float(self.action_mean)]
@@ -213,7 +214,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         if self.global_step % 10000 == 0:
             o, a, r = self.split_bundle(xs_pred)
             trajectory = o.detach().cpu()
-            images = make_grid_images(batch, 4, trajectory)
+            images = make_grid_images(batch, self.plot_samples, trajectory)
             # images = make_trajectory_images(
             #     self.plot_env_id, trajectory, trajectory.shape[1], None, None, False
             # )
@@ -416,7 +417,7 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         # # wall, _, _ = self._decode_grid(start_obs)
         # maze_grids = self._walls_to_maze_grids(wall[: o_xy.shape[1]])
         images = make_grid_images(
-            batch, sample_size=8, prediction=o_xy
+            batch, sample_size=self.plot_samples, prediction=o_xy
         )
         # images = make_trajectory_images(
         #     self.plot_env_id,
@@ -647,13 +648,12 @@ class DiffusionForcingPlanning(DiffusionForcingBase):
         self.log(f"{namespace}/first_reach", first_reach.mean())
 
         # Visualization
-        samples = min(16, batch_size)
         trajectory = torch.stack(trajectory)
         start = start[:, :2].cpu().numpy().tolist()
         goal = goal[:, :2].cpu().numpy().tolist()
         # images = make_trajectory_images(self.env_id, trajectory, samples, start, goal, self.plot_end_points)
         images = make_grid_images(
-            batch, sample_size=samples, prediction=trajectory
+            batch, sample_size=self.plot_samples, prediction=trajectory
         )
 
         for i, img in enumerate(images):

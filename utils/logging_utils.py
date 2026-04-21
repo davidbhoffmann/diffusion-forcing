@@ -276,6 +276,11 @@ def make_grid_images(batch, sample_size=1, prediction=None):
         # Use predicted trajectory if available
         observations = prediction.permute(1,0,2)[:sample_size].int() * 2 + 1
 
+    x = torch.tensor([-1,2,3,4,2])
+    if not ((observations < grid_size).all() and (observations >= 0).all()):
+        print("Warning: clipped trajectory values larger than (grid size - 1).")
+        print(x.clip(0, grid_size-1))
+
     # Fill in trajectory gaps
     traj_len = observations.shape[1] * 2 - 1
     if traj_len==1:
